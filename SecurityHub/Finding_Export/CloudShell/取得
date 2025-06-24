@@ -1,0 +1,22 @@
+next_token=""
+page=1
+while true; do
+    echo "ページ ${page} 取得中..."
+    
+    if [ -z "$next_token" ]; then
+        response=$(aws securityhub get-findings --region ap-northeast-1 --max-items 100 --output json)
+    else
+        response=$(aws securityhub get-findings --region ap-northeast-1 --max-items 100 --starting-token "$next_token" --output json)
+    fi
+    
+    echo "$response" | jq -r '.Findings[]? | [(.Title // "N/A"),(.Severity.Label // "N/A"),(.Workflow.Status // "NEW"),(.Region // "ap-northeast-1"),(.ProductName // "N/A"),(if .Resources and (.Resources | length > 0) then (.Resources[0].Type + ":" + (.Resources[0].Id // "N/A")) else "N/A" end),(.Compliance.Status // ""),(.UpdatedAt // .CreatedAt // "N/A")] | @csv' >> security_hub_findings.csv
+    
+    current=$(echo "$response" | jq '.Findings | length')
+    total=$(wc -l < security_hub_findings.csv)
+    echo "  ${current}件取得 (累計: $((total-1))件)"
+    
+    next_token=$(echo "$response" | jq -r '.NextToken // empty')
+    [ -z "$next_token" ] && break
+    
+    page=$((page + 1))
+done
