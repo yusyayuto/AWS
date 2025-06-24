@@ -1,0 +1,1 @@
+echo "完了: $(($(wc -l < security_hub_findings.csv)-1))件取得"
