@@ -1,1 +1,0 @@
-echo "Title,Severity,WorkflowStatus,Region,ProductName,ResourceTypeAndId,ComplianceStatus,UpdatedAt" > security_hub_findings.csv
