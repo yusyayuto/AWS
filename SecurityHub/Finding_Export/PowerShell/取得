@@ -84,3 +84,6 @@ Write-Host "総取得件数: $totalAllRegions 件"
 $lineCount = (Get-Content "security_hub_findings.csv").Count - 1
 Write-Host "完了: $lineCount 件取得"
 Write-Host "ファイル: security_hub_findings.csv"
+
+ステップ4:ダウンロード
+Copy-Item security_hub_findings.csv -Destination "$env:USERPROFILE\Desktop\"
