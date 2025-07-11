@@ -1,0 +1,174 @@
+---
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Create IAM Role etc.
+
+Resources:
+  ## IAM: Managed Policy (AmazonSSMGetParametersPolicy)
+  AmazonSSMGetParametersPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: AmazonSSMGetParametersPolicy
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action: ssm:GetParameters
+            Resource: '*'
+
+  ## IAM: Managed Policy (SecretsManagerGetSecretValuePolicy)
+  SecretsManagerGetSecretValuePolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: SecretsManagerGetSecretValuePolicy
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action: secretsmanager:GetSecretValue
+            Resource: '*'
+
+  ## IAM: Managed Policy (AmazonECSExecuteCommandPolicy)
+  ## Amazon ECS task IAM role - Amazon Elastic Container Service
+  ## Ref. https://docs.aws.amazon.com/AmazonECS/latest/developerguide/task-iam-roles.html#ecs-exec-required-iam-permissions
+  AmazonECSExecuteCommandPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: AmazonECSExecuteCommandPolicy
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+              - ssmmessages:CreateControlChannel
+              - ssmmessages:CreateDataChannel
+              - ssmmessages:OpenControlChannel
+              - ssmmessages:OpenDataChannel
+            Resource: '*'
+
+  ## IAM: Role (AmazonECSTaskExecutionRole)
+  ## Amazon ECS Task Execution IAM Role - Amazon Elastic Container Service
+  ## Ref. https://docs.aws.amazon.com/AmazonECS/latest/developerguide/task_execution_IAM_role.html
+  AmazonECSTaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: AmazonECSTaskExecutionRole
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+        - Ref: AmazonSSMGetParametersPolicy
+        - Ref: SecretsManagerGetSecretValuePolicy
+
+  ## IAM: Role (AmazonSSMManagedECSInstanceRole)
+  ## Amazon ECS Container Instance IAM Role - Amazon Elastic Container Service
+  ## Ref. https://docs.aws.amazon.com/AmazonECS/latest/developerguide/instance_IAM_role.html
+  ## Step 2: Verify or Create an IAM Instance Profile with Session Manager Permissions - AWS Systems Manager
+  ## Ref. https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-getting-started-instance-profile.html
+  AmazonSSMManagedECSInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: AmazonSSMManagedECSInstanceRole
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        ## Default policy for the Amazon EC2 Role for Amazon EC2 Container Service.
+        - arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role
+        ## To use the Session Manager
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+
+  ## IAM: Instance Profile (AmazonSSMManagedECSInstanceRole)
+  AmazonSSMManagedECSInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: !Ref AmazonSSMManagedECSInstanceRole
+      Roles:
+        - Ref: AmazonSSMManagedECSInstanceRole
+
+  ## IAM: Role (AmazonRDSEnhancedMonitoringRole)
+  ## Ref. https://docs.aws.amazon.com/ja_jp/AmazonRDS/latest/UserGuide/USER_Monitoring.OS.html
+  AmazonRDSEnhancedMonitoringRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: AmazonRDSEnhancedMonitoringRole
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: monitoring.rds.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonRDSEnhancedMonitoringRole
+
+Outputs:
+  ## IAM: Managed Policy (AmazonSSMGetParametersPolicy)
+  AmazonSSMGetParametersPolicy:
+    Value: !Ref AmazonSSMGetParametersPolicy
+    Export:
+      Name: !Sub ${AWS::StackName}-AmazonSSMGetParametersPolicy
+
+  ## IAM: Managed Policy (SecretsManagerGetSecretValuePolicy)
+  SecretsManagerGetSecretValuePolicy:
+    Value: !Ref SecretsManagerGetSecretValuePolicy
+    Export:
+      Name: !Sub ${AWS::StackName}-SecretsManagerGetSecretValuePolicy
+
+  ## IAM: Managed Policy (AmazonECSExecuteCommandPolicy)
+  AmazonECSExecuteCommandPolicy:
+    Value: !Ref AmazonECSExecuteCommandPolicy
+    Export:
+      Name: !Sub ${AWS::StackName}-AmazonECSExecuteCommandPolicy
+
+  ## IAM: Role (AmazonECSTaskExecutionRole)
+  AmazonECSTaskExecutionRole:
+    Value: !Ref AmazonECSTaskExecutionRole
+    Export:
+      Name: !Sub ${AWS::StackName}-AmazonECSTaskExecutionRole
+
+  AmazonECSTaskExecutionRoleArn:
+    Value: !GetAtt AmazonECSTaskExecutionRole.Arn
+    Export:
+      Name: !Sub ${AWS::StackName}-AmazonECSTaskExecutionRoleArn
+
+  ## IAM: Role (AmazonSSMManagedECSInstanceRole)
+  AmazonSSMManagedECSInstanceRole:
+    Value: !Ref AmazonSSMManagedECSInstanceRole
+    Export:
+      Name: !Sub ${AWS::StackName}-AmazonSSMManagedECSInstanceRole
+
+  AmazonSSMManagedECSInstanceRoleArn:
+    Value: !GetAtt AmazonSSMManagedECSInstanceRole.Arn
+    Export:
+      Name: !Sub ${AWS::StackName}-AmazonSSMManagedECSInstanceRoleArn
+
+  ## IAM: Instance Profile (AmazonSSMManagedECSInstanceRole)
+  AmazonSSMManagedECSInstanceProfile:
+    Value: !Ref AmazonSSMManagedECSInstanceProfile
+    Export:
+      Name: !Sub ${AWS::StackName}-AmazonSSMManagedECSInstanceProfile
+
+  AmazonSSMManagedECSInstanceProfileArn:
+    Value: !GetAtt AmazonSSMManagedECSInstanceProfile.Arn
+    Export:
+      Name: !Sub ${AWS::StackName}-AmazonSSMManagedECSInstanceProfileArn
+
+  ## IAM: Role (AmazonRDSEnhancedMonitoringRole)
+  AmazonRDSEnhancedMonitoringRole:
+    Value: !Ref AmazonRDSEnhancedMonitoringRole
+    Export:
+      Name: !Sub ${AWS::StackName}-AmazonRDSEnhancedMonitoringRole
+
+  AmazonRDSEnhancedMonitoringRoleArn:
+    Value: !GetAtt AmazonRDSEnhancedMonitoringRole.Arn
+    Export:
+      Name: !Sub ${AWS::StackName}-AmazonRDSEnhancedMonitoringRoleArn
