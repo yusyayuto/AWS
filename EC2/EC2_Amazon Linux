@@ -1,0 +1,257 @@
+---
+### [Change System Name] awsmaster
+## The following CFn stack must be created first in order to be referenced by the ImportValue function.
+## 1. ${SystemName}-${Environment}-route53
+## 2. ${SystemName}-${Environment}-vpc
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Create EC2 Instance etc.
+
+Parameters:
+  SystemName:
+    Description: System Name
+    Type: String
+    Default: awsmaster ### [Change System Name]
+  Environment:
+    Description: Environment
+    Type: String
+    Default: prod
+    AllowedValues:
+      - prod
+      - stg
+      - dev
+  SubDomain:
+    Description: Sub Domain
+    Type: String
+    Default: ec2
+    AllowedPattern: ^[^.]*$
+  ResourceName:
+    Description: Resource Name
+    Type: String
+    Default: notvia
+  EC2ImageId:
+    Description: >
+      Amazon Linux 2023 on Amazon EC2 - Amazon Linux 2023
+      https://docs.aws.amazon.com/ja_jp/linux/al2023/ug/ec2.html#launch-via-aws-cli
+      https://ap-northeast-1.console.aws.amazon.com/systems-manager/parameters/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64/description
+      e.g. al2023-ami-2023.3.20240122.0-kernel-6.1-x86_64
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: "Environment Configuration"
+        Parameters:
+          - SystemName
+          - Environment
+          - SubDomain
+          - ResourceName
+          - EC2ImageId
+
+Resources:
+  ## IAM: Role
+  IAMRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${SystemName}-${Environment}-${ResourceName}-ec2-role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        ## To use the Session Manager
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: AmazonS3CfGetObjectPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: s3:ListAllMyBuckets
+                Resource: "*"
+              - Effect: Allow
+                Action: s3:ListBucket
+                Resource: !Sub arn:aws:s3:::cf-${AWS::AccountId}-${AWS::Region}
+              - Effect: Allow
+                Action: s3:GetObject
+                Resource: !Sub arn:aws:s3:::cf-${AWS::AccountId}-${AWS::Region}/*
+
+  ## IAM: Instance Profile
+  IAMInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: !Ref IAMRole
+      Roles:
+        - !Ref IAMRole
+
+  ## EC2(VPC): Security Group
+  EC2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub ${SystemName}-${Environment}-${ResourceName}-ec2-sg
+      GroupDescription: !Sub ${SystemName}-${Environment}-${ResourceName}-ec2-sg
+      VpcId:
+        Fn::ImportValue: !Sub ${SystemName}-${Environment}-vpc-VPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${SystemName}-${Environment}-${ResourceName}-ec2-sg
+
+  ## EC2(VPC): Security Group Inbound Rule From Any (HTTP)
+  EC2SecurityGroupIngressHttp:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref EC2SecurityGroup
+      IpProtocol: tcp
+      FromPort: 80
+      ToPort: 80
+      CidrIp: 0.0.0.0/0
+      Description: any
+
+  ## EC2: Instance
+  Instance:
+    Type: AWS::EC2::Instance
+    ## To retain the instance to be replaced when updating the instance
+    UpdateReplacePolicy: Retain
+    Properties:
+      ImageId: !Ref EC2ImageId
+      InstanceType: t2.micro
+      IamInstanceProfile: !Ref IAMInstanceProfile
+      SubnetId:
+        Fn::ImportValue: !Sub ${SystemName}-${Environment}-vpc-SubnetPublicC
+      SecurityGroupIds:
+        - !Ref EC2SecurityGroup
+      Monitoring: false
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          dnf -y update
+          aws configure set default.region ${AWS::Region}
+          ## Install Docker Engine
+          dnf install -y docker
+          systemctl enable --now docker
+          ## Install Docker Compose
+          CLI_DIR=/usr/local/lib/docker/cli-plugins
+          LATEST_RELEASE=$(curl -s https://api.github.com/repos/docker/compose/releases/latest | grep browser_download_url | grep -i $(uname -s)-$(uname -m) | grep -v sha256 | cut -d : -f 2,3 | tr -d \")
+          mkdir -p ${!CLI_DIR}
+          curl -sL ${!LATEST_RELEASE} -o ${!CLI_DIR}/docker-compose
+          chmod +x ${!CLI_DIR}/docker-compose
+          ln -s ${!CLI_DIR}/docker-compose /usr/bin/docker-compose
+          ## Run Docker Container
+          docker container run --name nginx --restart=always -d -p 80:80 nginx
+      ## In Amazon Linux 2, gp2 was the default and I had to specify to change to gp3.
+      ## But in Amazon Linux 2023, gp3 is now the default, so I no longer need to specify.
+      # BlockDeviceMappings:
+      #   - DeviceName: /dev/xvda
+      #     Ebs:
+      #       VolumeSize: 8
+      #       VolumeType: gp3
+      #       # Encrypted: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${SystemName}-${Environment}-${ResourceName}-ec2
+      PropagateTagsToVolumeOnCreation: true
+
+  ## EC2(VPC): EIP
+  EIP:
+    Type: AWS::EC2::EIP
+    Properties:
+      InstanceId: !Ref Instance
+      Tags:
+        - Key: Name
+          Value: !Sub ${SystemName}-${Environment}-${ResourceName}-ec2-eip
+
+  ## Route 53: Record Set (IPv4)
+  Route53RecordSetIPv4:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId:
+        Fn::ImportValue: !Sub ${SystemName}-${Environment}-route53-HostedZone
+      Name: !Sub
+          - "${SubDomain}.${DomainName}."
+          - DomainName:
+              Fn::ImportValue: !Sub ${SystemName}-${Environment}-route53-HostedZoneDomainName
+      Type: A
+      ResourceRecords:
+        - !Ref EIP
+      TTL: "300"
+
+Outputs:
+  ## IAM: Role
+  IAMRole:
+    Value: !Ref IAMRole
+    Export:
+      Name: !Sub ${AWS::StackName}-IAMRole
+
+  IAMRoleArn:
+    Value: !GetAtt IAMRole.Arn
+    Export:
+      Name: !Sub ${AWS::StackName}-IAMRoleArn
+
+  ## IAM: Instance Profile
+  IAMInstanceProfile:
+    Value: !Ref IAMInstanceProfile
+    Export:
+      Name: !Sub ${AWS::StackName}-IAMInstanceProfile
+
+  IAMInstanceProfileArn:
+    Value: !GetAtt IAMInstanceProfile.Arn
+    Export:
+      Name: !Sub ${AWS::StackName}-IAMInstanceProfileArn
+
+  ## EC2(VPC): Security Group
+  EC2SecurityGroup:
+    Value: !Ref EC2SecurityGroup
+    Export:
+      Name: !Sub ${AWS::StackName}-EC2SecurityGroup
+
+  EC2SecurityGroupVpcId:
+    Value: !GetAtt EC2SecurityGroup.VpcId
+    Export:
+      Name: !Sub ${AWS::StackName}-EC2SecurityGroupVpcId
+
+  ## EC2: Instance
+  Instance:
+    Value: !Ref Instance
+    Export:
+      Name: !Sub ${AWS::StackName}-Instance
+
+  InstanceAvailabilityZone:
+    Value: !GetAtt Instance.AvailabilityZone
+    Export:
+      Name: !Sub ${AWS::StackName}-InstanceAvailabilityZone
+
+  InstancePrivateDnsName:
+    Value: !GetAtt Instance.PrivateDnsName
+    Export:
+      Name: !Sub ${AWS::StackName}-InstancePrivateDnsName
+
+  InstancePrivateIp:
+    Value: !GetAtt Instance.PrivateIp
+    Export:
+      Name: !Sub ${AWS::StackName}-InstancePrivateIp
+
+  InstancePublicDnsName:
+    Value: !GetAtt Instance.PublicDnsName
+    Export:
+      Name: !Sub ${AWS::StackName}-InstancePublicDnsName
+
+  InstancePublicIp:
+    Value: !GetAtt Instance.PublicIp
+    Export:
+      Name: !Sub ${AWS::StackName}-InstancePublicIp
+
+  ## EC2(VPC): EIP
+  EIP:
+    Value: !Ref EIP
+    Export:
+      Name: !Sub ${AWS::StackName}-EIP
+
+  ## Route 53: Record Set (IPv4)
+  Route53RecordSetIPv4:
+    Value: !Ref Route53RecordSetIPv4
+    Export:
+      Name: !Sub ${AWS::StackName}-Route53RecordSetIPv4
