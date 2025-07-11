@@ -1,0 +1,425 @@
+---
+### [Change System Name] awsmaster
+## The following CFn stack must be created first in order to be referenced by the ImportValue function.
+## 1. ${SystemName}-${Environment}-route53
+## 2. ${SystemName}-${Environment}-certificatemanager
+## 3. ${SystemName}-${Environment}-vpc
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Create ELB
+
+Parameters:
+  SystemName:
+    Description: System Name
+    Type: String
+    Default: awsmaster ### [Change System Name]
+  Environment:
+    Description: Environment
+    Type: String
+    Default: prod
+    AllowedValues:
+      - prod
+      - stg
+      - dev
+  SubDomain:
+    Description: Sub Domain
+    Type: String
+    Default: elb
+    AllowedPattern: ^[^.]*$
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: "Environment Configuration"
+        Parameters:
+          - SystemName
+          - Environment
+          - SubDomain
+
+Resources:
+  ## S3: Bucket (Access Logs)
+  S3BucketAccessLogs:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub ${SystemName}-${Environment}-alb-accesslogs-${AWS::AccountId}
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        IgnorePublicAcls: true
+        BlockPublicPolicy: true
+        RestrictPublicBuckets: true
+
+  ## S3: Bucket (Connection Logs)
+  S3BucketConnectionLogs:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub ${SystemName}-${Environment}-alb-connectionlogs-${AWS::AccountId}
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        IgnorePublicAcls: true
+        BlockPublicPolicy: true
+        RestrictPublicBuckets: true
+
+  ## S3: Bucket Policy (Access Logs)
+  S3BucketPolicyAccessLogs:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref S3BucketAccessLogs
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action: s3:PutObject
+            Principal:
+              ## The account ID for ELB log output is fixed: 582318560864
+              ## Enable access logs for your Application Load Balancer - Elastic Load Balancing
+              ## https://docs.aws.amazon.com/elasticloadbalancing/latest/application/enable-access-logging.html
+              AWS: arn:aws:iam::582318560864:root
+            Resource: !Sub ${S3BucketAccessLogs.Arn}/AWSLogs/${AWS::AccountId}/*
+
+  ## S3: Bucket Policy (Connection Logs)
+  S3BucketPolicyConnectionLogs:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref S3BucketConnectionLogs
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action: s3:PutObject
+            Principal:
+              ## The account ID for ELB log output is fixed: 582318560864
+              ## Enable connection logs for your Application Load Balancer - Elastic Load Balancing
+              ## https://docs.aws.amazon.com/elasticloadbalancing/latest/application/enable-connection-logging.html
+              AWS: arn:aws:iam::582318560864:root
+            Resource: !Sub ${S3BucketConnectionLogs.Arn}/AWSLogs/${AWS::AccountId}/*
+
+  ## EC2(VPC): Security Group
+  EC2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub ${SystemName}-${Environment}-alb-sg
+      GroupDescription: !Sub ${SystemName}-${Environment}-alb-sg
+      VpcId:
+        Fn::ImportValue: !Sub ${SystemName}-${Environment}-vpc-VPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${SystemName}-${Environment}-alb-sg
+
+  ## EC2(VPC): Security Group Inbound Rule From Any (HTTP)
+  EC2SecurityGroupIngressHttp:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref EC2SecurityGroup
+      IpProtocol: tcp
+      FromPort: 80
+      ToPort: 80
+      CidrIp: 0.0.0.0/0
+      Description: any
+
+  ## EC2(VPC): Security Group Inbound Rule From Any (HTTPS)
+  EC2SecurityGroupIngressHttps:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref EC2SecurityGroup
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+      CidrIp: 0.0.0.0/0
+      Description: any
+
+  ## ELB: Load Balancer (ALB)
+  LoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    ## Because permission to output access and connection logs is required first when creating ALB.
+    DependsOn:
+      - S3BucketPolicyAccessLogs
+      - S3BucketPolicyConnectionLogs
+    Properties:
+      Name: !Sub ${SystemName}-${Environment}-alb
+      IpAddressType: ipv4
+      Type: application
+      Subnets:
+        - Fn::ImportValue: !Sub ${SystemName}-${Environment}-vpc-SubnetPublicA
+        - Fn::ImportValue: !Sub ${SystemName}-${Environment}-vpc-SubnetPublicC
+        - Fn::ImportValue: !Sub ${SystemName}-${Environment}-vpc-SubnetPublicD
+      LoadBalancerAttributes:
+        - Key: routing.http2.enabled
+          Value: true
+        - Key: deletion_protection.enabled
+          Value: true
+        - Key: access_logs.s3.enabled
+          Value: true
+        - Key: access_logs.s3.bucket
+          Value: !Ref S3BucketAccessLogs
+        - Key: connection_logs.s3.enabled
+          Value: true
+        - Key: connection_logs.s3.bucket
+          Value: !Ref S3BucketConnectionLogs
+      SecurityGroups:
+        - !Ref EC2SecurityGroup
+
+  ## ELB: Listener (HTTP)
+  ListenerHttp:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: redirect
+          RedirectConfig:
+            Protocol: HTTPS
+            Port: "443"
+            Host: "#{host}"
+            Path: "/#{path}"
+            Query: "#{query}"
+            StatusCode: HTTP_301
+      ListenerAttributes:
+        - Key: routing.http.response.content_security_policy.header_value
+          Value: default-src 'self'
+        - Key: routing.http.response.x_content_type_options.header_value
+          Value: nosniff
+        - Key: routing.http.response.x_frame_options.header_value
+          Value: SAMEORIGIN
+
+  ## ELB: Listener (HTTPS)
+  ListenerHttps:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: 443
+      Protocol: HTTPS
+      Certificates:
+        - CertificateArn:
+            Fn::ImportValue: !Sub ${SystemName}-${Environment}-certificatemanager-Certificate
+      SslPolicy: ELBSecurityPolicy-TLS13-1-2-Res-2021-06
+      DefaultActions:
+        - Type: fixed-response
+          FixedResponseConfig:
+            StatusCode: "403"
+            ContentType: text/html
+            MessageBody: |
+              <html>
+              <head><title>403 Forbidden</title></head>
+              <body>
+              <center><h1>403 Forbidden</h1></center>
+              </body>
+              </html>
+      ListenerAttributes:
+        - Key: routing.http.response.strict_transport_security.header_value
+          Value: max-age=31536000; includeSubDomains
+        - Key: routing.http.response.content_security_policy.header_value
+          Value: default-src 'self'
+        - Key: routing.http.response.x_content_type_options.header_value
+          Value: nosniff
+        - Key: routing.http.response.x_frame_options.header_value
+          Value: SAMEORIGIN
+
+  ## ELB: Listener Rule (302 Found)
+  ListenerRuleRedirect:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref ListenerHttps
+      Priority: 11
+      Conditions:
+        - Field: host-header
+          HostHeaderConfig:
+            Values:
+              - !Sub
+                - "${SubDomain}.${DomainName}"
+                - DomainName:
+                    Fn::ImportValue: !Sub ${SystemName}-${Environment}-route53-HostedZoneDomainName
+        - Field: path-pattern
+          PathPatternConfig:
+            Values:
+              - /
+      Actions:
+        - Type: redirect
+          RedirectConfig:
+            Protocol: HTTPS
+            Port: "443"
+            Host: "#{host}"
+            Path: /users
+            Query: "#{query}"
+            StatusCode: HTTP_302
+
+  ## ELB: Listener Rule (404 Not Found)
+  ListenerRuleNotFound:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref ListenerHttps
+      Priority: 100
+      Conditions:
+        - Field: host-header
+          HostHeaderConfig:
+            Values:
+              - !Sub
+                - "${SubDomain}.${DomainName}"
+                - DomainName:
+                    Fn::ImportValue: !Sub ${SystemName}-${Environment}-route53-HostedZoneDomainName
+      Actions:
+        - Type: fixed-response
+          FixedResponseConfig:
+            StatusCode: "404"
+            ContentType: text/html
+            MessageBody: |
+              <html>
+              <head><title>404 Not Found</title></head>
+              <body>
+              <center><h1>404 Not Found</h1></center>
+              </body>
+              </html>
+
+  ## Route 53: Record Set (IPv4)
+  Route53RecordSetIPv4:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId:
+        Fn::ImportValue: !Sub ${SystemName}-${Environment}-route53-HostedZone
+      Name: !Sub
+          - "${SubDomain}.${DomainName}."
+          - DomainName:
+              Fn::ImportValue: !Sub ${SystemName}-${Environment}-route53-HostedZoneDomainName
+      Type: A
+      AliasTarget:
+        HostedZoneId: !GetAtt LoadBalancer.CanonicalHostedZoneID
+        DNSName: !Sub dualstack.${LoadBalancer.DNSName}
+
+Outputs:
+  ## S3: Bucket (Access Logs)
+  S3BucketAccessLogs:
+    Value: !Ref S3BucketAccessLogs
+    Export:
+      Name: !Sub ${AWS::StackName}-S3BucketAccessLogs
+
+  S3BucketAccessLogsArn:
+    Value: !GetAtt S3BucketAccessLogs.Arn
+    Export:
+      Name: !Sub ${AWS::StackName}-S3BucketAccessLogsArn
+
+  S3BucketAccessLogsDomainName:
+    Value: !GetAtt S3BucketAccessLogs.DomainName
+    Export:
+      Name: !Sub ${AWS::StackName}-S3BucketAccessLogsDomainName
+
+  S3BucketAccessLogsDualStackDomainName:
+    Value: !GetAtt S3BucketAccessLogs.DualStackDomainName
+    Export:
+      Name: !Sub ${AWS::StackName}-S3BucketAccessLogsDualStackDomainName
+
+  S3BucketAccessLogsRegionalDomainName:
+    Value: !GetAtt S3BucketAccessLogs.RegionalDomainName
+    Export:
+      Name: !Sub ${AWS::StackName}-S3BucketAccessLogsRegionalDomainName
+
+  ## S3: Bucket (Connection Logs)
+  S3BucketConnectionLogs:
+    Value: !Ref S3BucketConnectionLogs
+    Export:
+      Name: !Sub ${AWS::StackName}-S3BucketConnectionLogs
+
+  S3BucketConnectionLogsArn:
+    Value: !GetAtt S3BucketConnectionLogs.Arn
+    Export:
+      Name: !Sub ${AWS::StackName}-S3BucketConnectionLogsArn
+
+  S3BucketConnectionLogsDomainName:
+    Value: !GetAtt S3BucketConnectionLogs.DomainName
+    Export:
+      Name: !Sub ${AWS::StackName}-S3BucketConnectionLogsDomainName
+
+  S3BucketConnectionLogsDualStackDomainName:
+    Value: !GetAtt S3BucketConnectionLogs.DualStackDomainName
+    Export:
+      Name: !Sub ${AWS::StackName}-S3BucketConnectionLogsDualStackDomainName
+
+  S3BucketConnectionLogsRegionalDomainName:
+    Value: !GetAtt S3BucketConnectionLogs.RegionalDomainName
+    Export:
+      Name: !Sub ${AWS::StackName}-S3BucketConnectionLogsRegionalDomainName
+
+  ## EC2(VPC): Security Group
+  EC2SecurityGroup:
+    Value: !Ref EC2SecurityGroup
+    Export:
+      Name: !Sub ${AWS::StackName}-EC2SecurityGroup
+
+  EC2SecurityGroupVpcId:
+    Value: !GetAtt EC2SecurityGroup.VpcId
+    Export:
+      Name: !Sub ${AWS::StackName}-EC2SecurityGroupVpcId
+
+  ## ELB: LoadBalancer (ALB)
+  LoadBalancer:
+    Value: !Ref LoadBalancer
+    Export:
+      Name: !Sub ${AWS::StackName}-LoadBalancer
+
+  LoadBalancerCanonicalHostedZoneID:
+    Value: !GetAtt LoadBalancer.CanonicalHostedZoneID
+    Export:
+      Name: !Sub ${AWS::StackName}-LoadBalancerCanonicalHostedZoneID
+
+  LoadBalancerDNSName:
+    Value: !GetAtt LoadBalancer.DNSName
+    Export:
+      Name: !Sub ${AWS::StackName}-LoadBalancerDNSName
+
+  LoadBalancerFullName:
+    Value: !GetAtt LoadBalancer.LoadBalancerFullName
+    Export:
+      Name: !Sub ${AWS::StackName}-LoadBalancerFullName
+
+  LoadBalancerName:
+    Value: !GetAtt LoadBalancer.LoadBalancerName
+    Export:
+      Name: !Sub ${AWS::StackName}-LoadBalancerName
+
+  LoadBalancerSecurityGroup1:
+    Value: !Select [ 0, !GetAtt LoadBalancer.SecurityGroups ]
+    Export:
+      Name: !Sub ${AWS::StackName}-LoadBalancerSecurityGroup1
+
+  ## ELB: Listener (HTTP)
+  ListenerHttp:
+    Value: !Ref ListenerHttp
+    Export:
+      Name: !Sub ${AWS::StackName}-ListenerHttp
+
+  ## ELB: Listener (HTTPS)
+  ListenerHttps:
+    Value: !Ref ListenerHttps
+    Export:
+      Name: !Sub ${AWS::StackName}-ListenerHttps
+
+  ## ELB: Listener Rule (302 Found)
+  ListenerRuleRedirect:
+    Value: !Ref ListenerRuleRedirect
+    Export:
+      Name: !Sub ${AWS::StackName}-ListenerRuleRedirect
+
+  ## ELB: Listener Rule (404 Not Found)
+  ListenerRuleNotFound:
+    Value: !Ref ListenerRuleNotFound
+    Export:
+      Name: !Sub ${AWS::StackName}-ListenerRuleNotFound
+
+  ## Route 53: Record Set (IPv4)
+  Route53RecordSetIPv4:
+    Value: !Ref Route53RecordSetIPv4
+    Export:
+      Name: !Sub ${AWS::StackName}-Route53RecordSetIPv4
