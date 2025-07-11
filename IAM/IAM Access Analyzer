@@ -1,0 +1,18 @@
+---
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Create IAM Access Analyzer
+
+Resources:
+  ## Access Analyzer: Analyzer (External)
+  ExternalAccessAnalyzer:
+    Type: AWS::AccessAnalyzer::Analyzer
+    Properties:
+      AnalyzerName: ExternalAccessAnalyzer
+      Type: ACCOUNT
+
+Outputs:
+  ## Access Analyzer: Analyzer (External)
+  ExternalAccessAnalyzer:
+    Value: !Ref ExternalAccessAnalyzer
+    Export:
+      Name: !Sub ${AWS::StackName}-ExternalAccessAnalyzer
