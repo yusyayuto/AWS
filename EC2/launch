@@ -1,0 +1,22 @@
+aws ec2 describe-launch-template-versions \
+  --launch-template-name YOUR_TEMPLATE_NAME \
+  --versions 1 \
+  --query 'LaunchTemplateVersions[0].LaunchTemplateData' \
+  > launch-template-data.json
+
+"BlockDeviceMappings": [
+  {
+    "DeviceName": "/dev/xvda",
+    "Ebs": {
+      "SnapshotId": "snap-xxxxxxxx",  // ←この行ごと削除
+      "VolumeSize": 30,
+      "VolumeType": "gp3",
+      "DeleteOnTermination": true
+    }
+  }
+]
+
+aws ec2 create-launch-template-version \
+  --launch-template-name YOUR_TEMPLATE_NAME \
+  --source-version 1 \
+  --launch-template-data file://launch-template-data.json
