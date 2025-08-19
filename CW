@@ -1,0 +1,13 @@
+aws cloudwatch put-metric-alarm \
+  --alarm-name "EC2-StatusCheckFailed-Alarm" \
+  --metric-name StatusCheckFailed_Instance \
+  --namespace AWS/EC2 \
+  --statistic Maximum \
+  --dimensions Name=InstanceId,Value=i-0123456789abcdef0 \
+  --period 60 \
+  --evaluation-periods 1 \
+  --threshold 1 \
+  --comparison-operator GreaterThanOrEqualToThreshold \
+  --alarm-actions arn:aws:sns:ap-northeast-1:123456789012:MySNSTopic \
+  --ok-actions arn:aws:sns:ap-northeast-1:123456789012:MySNSTopic \
+  --treat-missing-data notBreaching
