@@ -11,3 +11,25 @@ aws cloudwatch put-metric-alarm \
   --alarm-actions arn:aws:sns:ap-northeast-1:123456789012:MySNSTopic \
   --ok-actions arn:aws:sns:ap-northeast-1:123456789012:MySNSTopic \
   --treat-missing-data notBreaching
+
+
+確認手順（通知確認ナシの場合）
+	1.	アラームを強制的に ALARM にする
+aws cloudwatch set-alarm-state \
+  --alarm-name "EC2StatusCheckFailed" \
+  --state-value ALARM \
+  --state-reason "Test: manually set to ALARM" \
+  --region ap-northeast-1
+
+2.	状態を確認する
+aws cloudwatch describe-alarms \
+  --alarm-names "EC2StatusCheckFailed" \
+  --region ap-northeast-1 \
+  --query "MetricAlarms[0].StateValue"
+
+	3.	テスト後に戻す
+aws cloudwatch set-alarm-state \
+  --alarm-name "EC2StatusCheckFailed" \
+  --state-value OK \
+  --state-reason "Test reset to OK" \
+  --region ap-northeast-1
