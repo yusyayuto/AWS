@@ -1,19 +1,26 @@
-Sub DeleteColumnsInBlocks()
-    Dim ws As Worksheet
-    Set ws = ThisWorkbook.Sheets("Sheet1") 'シート名は適宜変更してください
-
-    Dim startCol As Long
-    Dim endCol As Long
-    Dim blockSize As Long
-    Dim i As Long
+Sub DeleteCols_Blockwise()
+    Const BLOCK_SIZE As Long = 33    ' A～AG
+    Const DELETE_FROM As Long = 8    ' H
+    Const DELETE_TO   As Long = 33   ' AG
     
-    ' 例えばA列(1)からAZ列(52)が1ブロックで、その中のH列(8)からAG列(33)を削除する場合
-    startCol = 8 ' H列
-    endCol = 33 ' AG列
-    blockSize = 52 ' A列からAZ列までが1ブロック（ここは必要に応じて調整）
-
-    ' 最終列まで繰り返し削除
-    For i = endCol To ws.Cells(1, ws.Columns.Count).End(xlToLeft).Column Step blockSize
-        ws.Columns(i - endCol + startCol & ":" & i).Delete
-    Next i
+    Dim ws As Worksheet
+    Set ws = ThisWorkbook.Worksheets("Sheet2") ' シート名は調整
+    
+    Dim lastCol As Long
+    lastCol = ws.Cells(1, ws.Columns.Count).End(xlToLeft).Column
+    
+    Dim b As Long, sCol As Long, eCol As Long
+    Dim lastBlock As Long
+    lastBlock = ((lastCol - 1) \ BLOCK_SIZE) + 1
+    
+    ' 右から削除
+    For b = lastBlock To 1 Step -1
+        sCol = (b - 1) * BLOCK_SIZE + DELETE_FROM
+        eCol = (b - 1) * BLOCK_SIZE + DELETE_TO
+        If sCol <= lastCol Then
+            If eCol > lastCol Then eCol = lastCol
+            ws.Range(ws.Columns(sCol), ws.Columns(eCol)).EntireColumn.Delete
+            lastCol = ws.Cells(1, ws.Columns.Count).End(xlToLeft).Column
+        End If
+    Next b
 End Sub
