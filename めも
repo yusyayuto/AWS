@@ -1,0 +1,19 @@
+Sub DeleteColumnsInBlocks()
+    Dim ws As Worksheet
+    Set ws = ThisWorkbook.Sheets("Sheet1") 'シート名は適宜変更してください
+
+    Dim startCol As Long
+    Dim endCol As Long
+    Dim blockSize As Long
+    Dim i As Long
+    
+    ' 例えばA列(1)からAZ列(52)が1ブロックで、その中のH列(8)からAG列(33)を削除する場合
+    startCol = 8 ' H列
+    endCol = 33 ' AG列
+    blockSize = 52 ' A列からAZ列までが1ブロック（ここは必要に応じて調整）
+
+    ' 最終列まで繰り返し削除
+    For i = endCol To ws.Cells(1, ws.Columns.Count).End(xlToLeft).Column Step blockSize
+        ws.Columns(i - endCol + startCol & ":" & i).Delete
+    Next i
+End Sub
