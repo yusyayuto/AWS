@@ -1,21 +1,16 @@
--- 12/18の東京ログを検索
 SELECT
-  from_iso8601_timestamp(eventtime)                               AS event_time_utc,
+  eventtime                                       AS event_time_raw,
   eventname,
-  json_extract_scalar(useridentity, '$.type')                      AS principal_type,
-  coalesce(
-    json_extract_scalar(useridentity, '$.userName'),
-    json_extract_scalar(useridentity, '$.sessionContext.sessionIssuer.userName')
-  ) AS who,
-  json_extract_scalar(useridentity, '$.arn')                       AS who_arn,
+  COALESCE(useridentity.username, useridentity.sessioncontext.sessionissuer.username) AS who,
+  useridentity.arn                                AS who_arn,
   sourceipaddress,
   useragent
-FROM cloudtrail_db.ct_tmp_20241218_tokyo
-WHERE eventname = 'RunInstances'
+FROM <DB名>.<テーブル名>
+WHERE lower(eventname) = 'runinstances'
   AND (
-    requestparameters  LIKE '%"i-xxxxxxxxxxxxxxxxx"%'
-    OR responseelements LIKE '%"i-xxxxxxxxxxxxxxxxx"%'
-    OR resources        LIKE '%"i-xxxxxxxxxxxxxxxxx"%'
+      requestparameters  LIKE '%"i-あなたのインスタンスID"%'
+   OR responseelements   LIKE '%"i-あなたのインスタンスID"%'
+   OR resources          LIKE '%"i-あなたのインスタンスID"%'
   )
-ORDER BY event_time_utc ASC
+ORDER BY event_time_raw ASC
 LIMIT 100;
