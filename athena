@@ -1,0 +1,20 @@
+ALTER TABLE cloudtrail_db.cloudtrail_logs
+ADD PARTITION (region='ap-northeast-1', year='2025', month='09', day='03')
+LOCATION 's3://my-cloudtrail-logs/AWSLogs/123456789012/CloudTrail/ap-northeast-1/2025/09/03/';
+
+
+
+
+SELECT eventtime,
+       useridentity.arn,
+       useridentity.username,
+       sourceipaddress,
+       useragent,
+       eventname
+FROM cloudtrail_db.cloudtrail_logs
+WHERE eventname = 'RunInstances'
+  AND requestparameters LIKE '%i-0abc123def456ghij%'
+ORDER BY eventtime DESC
+LIMIT 20;
+
+
