@@ -1,20 +1,21 @@
-ALTER TABLE cloudtrail_db.cloudtrail_logs
-ADD PARTITION (region='ap-northeast-1', year='2025', month='09', day='03')
-LOCATION 's3://my-cloudtrail-logs/AWSLogs/123456789012/CloudTrail/ap-northeast-1/2025/09/03/';
-
-
-
-
-SELECT eventtime,
-       useridentity.arn,
-       useridentity.username,
-       sourceipaddress,
-       useragent,
-       eventname
-FROM cloudtrail_db.cloudtrail_logs
+-- 12/18の東京ログを検索
+SELECT
+  from_iso8601_timestamp(eventtime)                               AS event_time_utc,
+  eventname,
+  json_extract_scalar(useridentity, '$.type')                      AS principal_type,
+  coalesce(
+    json_extract_scalar(useridentity, '$.userName'),
+    json_extract_scalar(useridentity, '$.sessionContext.sessionIssuer.userName')
+  ) AS who,
+  json_extract_scalar(useridentity, '$.arn')                       AS who_arn,
+  sourceipaddress,
+  useragent
+FROM cloudtrail_db.ct_tmp_20241218_tokyo
 WHERE eventname = 'RunInstances'
-  AND requestparameters LIKE '%i-0abc123def456ghij%'
-ORDER BY eventtime DESC
-LIMIT 20;
-
-
+  AND (
+    requestparameters  LIKE '%"i-xxxxxxxxxxxxxxxxx"%'
+    OR responseelements LIKE '%"i-xxxxxxxxxxxxxxxxx"%'
+    OR resources        LIKE '%"i-xxxxxxxxxxxxxxxxx"%'
+  )
+ORDER BY event_time_utc ASC
+LIMIT 100;
