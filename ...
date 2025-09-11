@@ -1,0 +1,17 @@
+"InputTemplate": "{
+  \"DocumentName\":\"My-Automation-Doc\",
+  \"DocumentVersion\":\"$LATEST\",
+  \"Parameters\":{
+    \"AlarmName\":[\"<alarm>\"],
+    \"InstanceId\":[\"<instance>\"],
+    \"ServiceNames\":<services>
+  },
+  \"AutomationAssumeRole\":\"arn:aws:iam::123456789012:role/MyAutomationRole\"
+}"
+
+
+"InputPathsMap": {
+  "alarm": "$.detail.alarmName",
+  "instance": "$.detail.configuration.metrics[0].metricStat.metric.dimensions.InstanceId",
+  "services": "$.detail.serviceNames"
+}
