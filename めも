@@ -1,26 +1,120 @@
-Sub DeleteCols_Blockwise()
-    Const BLOCK_SIZE As Long = 33    ' A～AG
-    Const DELETE_FROM As Long = 8    ' H
-    Const DELETE_TO   As Long = 33   ' AG
-    
-    Dim ws As Worksheet
-    Set ws = ThisWorkbook.Worksheets("Sheet2") ' シート名は調整
-    
-    Dim lastCol As Long
-    lastCol = ws.Cells(1, ws.Columns.Count).End(xlToLeft).Column
-    
-    Dim b As Long, sCol As Long, eCol As Long
-    Dim lastBlock As Long
-    lastBlock = ((lastCol - 1) \ BLOCK_SIZE) + 1
-    
-    ' 右から削除
-    For b = lastBlock To 1 Step -1
-        sCol = (b - 1) * BLOCK_SIZE + DELETE_FROM
-        eCol = (b - 1) * BLOCK_SIZE + DELETE_TO
-        If sCol <= lastCol Then
-            If eCol > lastCol Then eCol = lastCol
-            ws.Range(ws.Columns(sCol), ws.Columns(eCol)).EntireColumn.Delete
-            lastCol = ws.Cells(1, ws.Columns.Count).End(xlToLeft).Column
-        End If
-    Next b
-End Sub
+schemaVersion: '0.3'
+description: EC2の状態に応じてサービス停止→EC2停止まで自動化
+assumeRole: "{{ AutomationAssumeRole }}"
+
+parameters:
+  InstanceId:
+    type: String
+  ServiceNames:
+    type: StringList
+    default: []
+  SleepSecondsAfterService:
+    type: Integer
+    default: 5
+  AutomationAssumeRole:
+    type: String
+    description: "SSMが実行に使うロール(assumeRole)"
+
+mainSteps:
+  # 1) まずEC2の現在状態を取得
+  - name: getInstanceState
+    action: aws:executeAwsApi
+    inputs:
+      Service: ec2
+      Api: DescribeInstances
+      InstanceIds:
+        - "{{ InstanceId }}"
+    outputs:
+      - Name: State
+        Selector: "$.Reservations[0].Instances[0].State.Name"
+        Type: String
+
+  # 2) 初期状態で分岐（runningならサービス停止へ / stopped等なら終わりへ）
+  - name: branchOnInitial
+    action: aws:branch
+    inputs:
+      Choices:
+        - NextStep: stopServices
+          Variable: "{{ getInstanceState.State }}"
+          StringEquals: "running"
+      Default:
+        # ここで「最初から停止してた」場合の処理に飛ばす
+        NextStep: doneAlreadyStopped
+
+  # 3) 対象Windowsサービスを全部停止
+  - name: stopServices
+    action: aws:runCommand
+    inputs:
+      DocumentName: AWS-RunPowerShellScript
+      Parameters:
+        commands:
+          - |
+            $names = @({{ ServiceNames }})
+            if ($names.Count -gt 0) {
+              Stop-Service -Name $names -Force -ErrorAction SilentlyContinue
+            }
+            # ログ用に状態表示
+            if ($names.Count -gt 0) {
+              Get-Service -Name $names | Select Name,Status
+            } else { Write-Output "No services specified." }
+
+  # 4) 5秒スリープ（パラメータ化）
+  - name: sleepAfterService
+    action: aws:sleep
+    inputs:
+      Duration: PT{{ SleepSecondsAfterService }}S
+
+  # 5) サービス状態の簡易確認（失敗しても継続したいなら onFailure で無視可）
+  - name: checkServices
+    action: aws:runCommand
+    onFailure: Continue
+    inputs:
+      DocumentName: AWS-RunPowerShellScript
+      Parameters:
+        commands:
+          - |
+            $names = @({{ ServiceNames }})
+            if ($names.Count -gt 0) {
+              Get-Service -Name $names | Select Name,Status
+            } else { Write-Output "No services to check." }
+
+  # 6) EC2停止を実行
+  - name: stopInstance
+    action: aws:executeAwsApi
+    inputs:
+      Service: ec2
+      Api: StopInstances
+      InstanceIds:
+        - "{{ InstanceId }}"
+
+  # 7) EC2が stopped になるまで待機
+  - name: waitForStopped
+    action: aws:waitForAwsResourceProperty
+    inputs:
+      Service: ec2
+      Api: DescribeInstances
+      InstanceIds:
+        - "{{ InstanceId }}"
+      PropertySelector: "$.Reservations[0].Instances[0].State.Name"
+      DesiredValues:
+        - stopped
+
+  # 8) 最初から停止してた場合の着地点
+  - name: doneAlreadyStopped
+    action: aws:runCommand
+    isEnd: true
+    inputs:
+      DocumentName: AWS-RunPowerShellScript
+      Parameters:
+        commands:
+          - Write-Output "Instance was not running initially. No stop action performed."
+
+  # 9) 通常終了
+  - name: done
+    action: aws:runCommand
+    isEnd: true
+    inputs:
+      DocumentName: AWS-RunPowerShellScript
+      Parameters:
+        commands:
+          - Write-Output "Services handled and instance is now stopped."
