@@ -1,11 +1,102 @@
-{
-  "version": "0",
-  "detail-type": "CloudWatch Alarm State Change",
-  "source": "aws.cloudwatch",
-  "region": "ap-northeast-1",
-  "detail": {
-    "alarmType": "CompositeAlarm",
-    "alarmName": "MyTargetCompositeAlarm",
-    "state": { "value": "ALARM" }
-  }
-}
+import os
+import json
+import logging
+import boto3
+
+log = logging.getLogger()
+log.setLevel(logging.INFO)
+
+cw  = boto3.client("cloudwatch")
+ssm = boto3.client("ssm")
+
+# ====== 環境変数（Lambdaの[構成]→[環境変数]で設定） ======
+RUNBOOK_NAME        = os.environ["RUNBOOK_NAME"]                 # 例: My-Automation-Doc
+RUNBOOK_VERSION     = os.environ.get("RUNBOOK_VERSION", "$LATEST")
+AUTOMATION_ROLE_ARN = os.environ.get("AUTOMATION_ROLE_ARN")      # 任意。Runbook側assumeRoleを明示で渡す場合
+ALLOWED_COMPOSITE   = {s.strip() for s in os.environ.get("ALLOWED_COMPOSITE_ALARMS","").split(",") if s.strip()}
+# ==========================================================
+
+def _children_pages(alarm_name: str):
+    """複合アラームの子（Metric/Composite）をページング取得"""
+    paginator = cw.get_paginator("describe_alarms")
+    return paginator.paginate(ChildrenOfAlarmName=alarm_name)
+
+def _extract_instance_ids_from_metric_alarm(m: dict) -> set[str]:
+    """MetricAlarmからInstanceIdを抽出（単一/メトリックマス両対応）"""
+    ids = set()
+    # 単一メトリクス型
+    for d in m.get("Dimensions", []):
+        if d.get("Name") == "InstanceId":
+            ids.add(d.get("Value"))
+    # メトリックマス（複数メトリクス）型
+    for mm in m.get("Metrics", []):
+        metric = (mm.get("MetricStat") or {}).get("Metric") or {}
+        for d in metric.get("Dimensions", []):
+            if d.get("Name") == "InstanceId":
+                ids.add(d.get("Value"))
+    return ids
+
+def _resolve_leaf_metric_alarms(root_composite_name: str) -> list[dict]:
+    """複合→複合…を辿り、最終的な MetricAlarms を全回収"""
+    to_visit = [root_composite_name]
+    seen     = set()
+    leaves   = []
+    while to_visit:
+        name = to_visit.pop()
+        if name in seen:
+            continue
+        seen.add(name)
+        for page in _children_pages(name):
+            leaves.extend(page.get("MetricAlarms", []))
+            for comp in page.get("CompositeAlarms", []):
+                to_visit.append(comp["AlarmName"])
+    return leaves
+
+def lambda_handler(event, context):
+    log.info({"event": event})
+
+    detail    = event.get("detail", {}) or {}
+    comp_name = detail.get("alarmName")
+    state     = (detail.get("state") or {}).get("value")
+
+    if not comp_name:
+        raise ValueError("detail.alarmName (composite) is required")
+    if state != "ALARM":
+        return {"skipped": True, "reason": f"state={state}"}
+    if ALLOWED_COMPOSITE and comp_name not in ALLOWED_COMPOSITE:
+        return {"skipped": True, "reason": f"alarm {comp_name} not allowed by ALLOWED_COMPOSITE_ALARMS"}
+
+    # 複合の“葉”までたどって InstanceId を抽出
+    metric_alarms = _resolve_leaf_metric_alarms(comp_name)
+    log.info({"metric_alarm_count": len(metric_alarms)})
+
+    instance_ids = set()
+    for m in metric_alarms:
+        instance_ids |= _extract_instance_ids_from_metric_alarm(m)
+    log.info({"found_instance_ids": list(instance_ids)})
+
+    if not instance_ids:
+        raise RuntimeError(f"No InstanceId found under composite '{comp_name}'")
+    if len(instance_ids) > 1:
+        raise RuntimeError(f"Multiple InstanceIds found: {sorted(instance_ids)}")
+
+    instance_id = next(iter(instance_ids))
+
+    # SSM Automation 起動
+    params = {
+        "AlarmName":  [comp_name],   # SSMのStringパラメータは ["value"] で渡す
+        "InstanceId": [instance_id]
+    }
+    kwargs = dict(DocumentName=RUNBOOK_NAME, DocumentVersion=RUNBOOK_VERSION, Parameters=params)
+    if AUTOMATION_ROLE_ARN:
+        kwargs["AutomationAssumeRole"] = AUTOMATION_ROLE_ARN
+
+    log.info({"ssm_params": params})
+    resp = ssm.start_automation_execution(**kwargs)
+
+    return {
+        "ok": True,
+        "AutomationExecutionId": resp["AutomationExecutionId"],
+        "AlarmName": comp_name,
+        "InstanceId": instance_id
+    }
