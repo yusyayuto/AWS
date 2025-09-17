@@ -1,8 +1,11 @@
 {
-  "source": ["aws.cloudwatch"],
-  "detail-type": ["CloudWatch Alarm State Change"],
+  "version": "0",
+  "detail-type": "CloudWatch Alarm State Change",
+  "source": "aws.cloudwatch",
+  "region": "ap-northeast-1",
   "detail": {
-    "alarmType": ["CompositeAlarm"],
-    "state": { "value": ["ALARM"] }
+    "alarmType": "CompositeAlarm",
+    "alarmName": "MyTargetCompositeAlarm",
+    "state": { "value": "ALARM" }
   }
 }
