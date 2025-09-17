@@ -1,63 +1,8 @@
-# lambda_function.py
-import os, json, boto3
-
-cw  = boto3.client("cloudwatch")
-ssm = boto3.client("ssm")
-
-RUNBOOK_NAME        = os.environ["RUNBOOK_NAME"]
-RUNBOOK_VERSION     = os.environ.get("RUNBOOK_VERSION", "$LATEST")
-AUTOMATION_ROLE_ARN = os.environ.get("AUTOMATION_ROLE_ARN")  # なくても可
-
-def handler(event, context):
-    # 1) 複合アラーム名を受け取る
-    detail = event.get("detail", {})
-    comp_name = detail.get("alarmName")
-    state     = (detail.get("state") or {}).get("value")
-    if not comp_name:
-        raise ValueError("detail.alarmName is required")
-    if state != "ALARM":
-        # 念のため：ALARM以外なら何もしない
-        return {"skipped": True, "reason": f"state={state}"}
-
-    # 2) 子アラームを列挙して InstanceId を抽出
-    #    ChildrenOfAlarmName を使うとルール文の自前パース不要
-    paginator = cw.get_paginator("describe_alarms")
-    instance_ids = set()
-
-    for page in paginator.paginate(ChildrenOfAlarmName=comp_name):
-        for m in page.get("MetricAlarms", []):
-            # 単一メトリクス型
-            dims = {d["Name"]: d["Value"] for d in m.get("Dimensions", [])}
-            if "InstanceId" in dims:
-                instance_ids.add(dims["InstanceId"])
-            # メトリクスマス/複合メトリクス型
-            for mm in m.get("Metrics", []):
-                metric = (mm.get("MetricStat") or {}).get("Metric") or {}
-                dims2  = {d["Name"]: d["Value"] for d in metric.get("Dimensions", [])}
-                if "InstanceId" in dims2:
-                    instance_ids.add(dims2["InstanceId"])
-
-    if not instance_ids:
-        raise RuntimeError(f"No InstanceId found in child alarms of composite '{comp_name}'")
-    if len(instance_ids) > 1:
-        # 設計前提：同一インスタンス監視。混在はエラーにして可視化
-        raise RuntimeError(f"Multiple InstanceIds found: {sorted(instance_ids)}")
-
-    instance_id = next(iter(instance_ids))
-
-    # 3) SSM Automation を起動
-    params = {
-        "AlarmName": [comp_name],     # Runbook側は String → ["value"]
-        "InstanceId": [instance_id],  # 同上
-    }
-    kwargs = dict(DocumentName=RUNBOOK_NAME, DocumentVersion=RUNBOOK_VERSION, Parameters=params)
-    if AUTOMATION_ROLE_ARN:
-        kwargs["AutomationAssumeRole"] = AUTOMATION_ROLE_ARN
-
-    resp = ssm.start_automation_execution(**kwargs)
-    return {
-        "ok": True,
-        "AutomationExecutionId": resp["AutomationExecutionId"],
-        "AlarmName": comp_name,
-        "InstanceId": instance_id
-    }
+{
+  "source": ["aws.cloudwatch"],
+  "detail-type": ["CloudWatch Alarm State Change"],
+  "detail": {
+    "alarmType": ["CompositeAlarm"],
+    "state": { "value": ["ALARM"] }
+  }
+}
