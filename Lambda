@@ -1,132 +1,48 @@
-# lambda_function.py
+import boto3
 import os
 import json
-import logging
-import boto3
 
-# ===== ログ設定 =====
-log = logging.getLogger()
-log.setLevel(logging.INFO)
-
-# ===== クライアント =====
-cw  = boto3.client("cloudwatch")
-ssm = boto3.client("ssm")
-
-# ===== 環境変数（Lambdaの[構成]→[環境変数]で設定）=====
-RUNBOOK_NAME        = os.environ["RUNBOOK_NAME"]                 # 例: My-Automation-Doc
-RUNBOOK_VERSION     = os.environ.get("RUNBOOK_VERSION", "$LATEST")
-AUTOMATION_ROLE_ARN = os.environ.get("AUTOMATION_ROLE_ARN")      # 任意（Runbook側assumeRoleを明示的に渡す場合）
-ALLOWED_COMPOSITE   = {s.strip() for s in os.environ.get("ALLOWED_COMPOSITE_ALARMS","").split(",") if s.strip()}
-# ========================================================
-
-# ---- CloudWatch 子アラーム（複合/メトリック）をページング取得
-def _children_pages(alarm_name: str):
-    return cw.get_paginator("describe_alarms").paginate(ChildrenOfAlarmName=alarm_name)
-
-# ---- 任意のネストから InstanceId を総当りで拾う（Dimensionsの場所・表記ゆれに依存しない）
-def _scan_instance_ids_anywhere(obj) -> set[str]:
-    found = set()
-    if obj is None:
-        return found
-
-    if isinstance(obj, dict):
-        # パターン1: { "Name": "InstanceId", "Value": "i-..." }
-        n = obj.get("Name") or obj.get("name")
-        v = obj.get("Value") or obj.get("value")
-        if isinstance(n, str) and n.lower() in ("instanceid", "instance_id"):
-            if isinstance(v, str) and v.startswith("i-"):
-                found.add(v)
-        # パターン2: 直接キーが InstanceId / instanceid
-        for k, val in obj.items():
-            if isinstance(k, str) and k.lower() in ("instanceid", "instance_id"):
-                if isinstance(val, str) and val.startswith("i-"):
-                    found.add(val)
-            # 再帰
-            found |= _scan_instance_ids_anywhere(val)
-
-    elif isinstance(obj, list):
-        for it in obj:
-            found |= _scan_instance_ids_anywhere(it)
-
-    return found
-
-# ---- 複合→（複合・・・）→メトリック の“葉”を全部集める
-def _resolve_leaf_metric_alarms(root_composite_name: str) -> list[dict]:
-    to_visit = [root_composite_name]
-    seen     = set()
-    leaves   = []
-    while to_visit:
-        name = to_visit.pop()
-        if name in seen:
-            continue
-        seen.add(name)
-        for page in _children_pages(name):
-            # 直下のメトリックアラーム
-            leaves.extend(page.get("MetricAlarms", []) or [])
-            # 直下の複合アラーム → さらに辿る
-            for comp in page.get("CompositeAlarms", []) or []:
-                next_name = comp.get("AlarmName")
-                if next_name:
-                    to_visit.append(next_name)
-    return leaves
+cw_client = boto3.client("cloudwatch")
+ssm_client = boto3.client("ssm")
 
 def lambda_handler(event, context):
-    log.info({"event": event})
+    print("Received event:", json.dumps(event))
 
-    detail    = event.get("detail") or {}
-    comp_name = detail.get("alarmName")
-    state     = (detail.get("state") or {}).get("value")
+    # 複合アラーム名をイベントから取得
+    composite_alarm_name = event.get("detail", {}).get("alarmName")
+    if not composite_alarm_name:
+        raise Exception("No composite alarm name in event")
 
-    # 受信バリデーション
-    if not comp_name:
-        raise ValueError("detail.alarmName (composite) is required")
-    if state != "ALARM":
-        return {"skipped": True, "reason": f"state={state}"}
-    if ALLOWED_COMPOSITE and comp_name not in ALLOWED_COMPOSITE:
-        return {"skipped": True, "reason": f"{comp_name} not allowed by ALLOWED_COMPOSITE_ALARMS"}
+    # 複合アラームの子アラーム一覧を取得
+    children_resp = cw_client.describe_alarms(ChildrenOfAlarmName=composite_alarm_name)
+    child_alarms = children_resp.get("MetricAlarms", []) + children_resp.get("CompositeAlarms", [])
 
-    # 子（最終的な Metric アラーム）を解決
-    metric_alarms = _resolve_leaf_metric_alarms(comp_name)
-    log.info({"metric_alarm_count": len(metric_alarms)})
+    # ALARM 状態の子アラームだけを抽出
+    alarm_children_in_alarm = [a["AlarmName"] for a in child_alarms if a["StateValue"] == "ALARM"]
 
-    # どこにあっても InstanceId を総当りで抽出（Windows_Service_Status / StatusCheckFailed_System 両対応）
-    instance_ids = set()
-    for m in metric_alarms:
-        instance_ids |= _scan_instance_ids_anywhere(m)
+    # 子アラームの詳細を取得
+    metric_alarms = []
+    if alarm_children_in_alarm:
+        detail_resp = cw_client.describe_alarms(AlarmNames=alarm_children_in_alarm)
+        metric_alarms = detail_resp.get("MetricAlarms", [])
 
-    log.info({"found_instance_ids": list(instance_ids)})
+    # InstanceId を抽出
+    instance_ids = []
+    for alarm in metric_alarms:
+        for dim in alarm.get("Dimensions", []):
+            if dim["Name"] == "InstanceId":
+                instance_ids.append(dim["Value"])
 
     if not instance_ids:
-        # 構造のヒントを少しだけログ（過剰出力は避ける）
-        sample = metric_alarms[0] if metric_alarms else {}
-        log.warning({"sample_metric_alarm": {
-            "AlarmName": sample.get("AlarmName"),
-            "Namespace": sample.get("Namespace"),
-            "MetricName": sample.get("MetricName"),
-            "has_Metrics_array": bool(sample.get("Metrics")),
-            "Dimensions_len": len(sample.get("Dimensions") or [])
-        }})
-        raise RuntimeError(f"No InstanceId found under composite '{comp_name}'")
+        raise Exception("No InstanceId found in child alarms")
 
-    # 前提：子はすべて同じ InstanceId → 1つに正規化
-    # 万一複数見えたら最初の1つを採用（厳格に失敗させたい場合はここで raise に変更）
-    instance_id = next(iter(instance_ids))
+    # SSM Automation を実行
+    automation_doc_name = os.environ.get("AUTOMATION_DOCUMENT_NAME", "test")
+    for instance_id in instance_ids:
+        response = ssm_client.start_automation_execution(
+            DocumentName=automation_doc_name,
+            Parameters={"UnhealthyInstanceId": [instance_id]}
+        )
+        print(f"Started Automation for {instance_id}, ExecutionId={response['AutomationExecutionId']}")
 
-    # ---- SSM Automation 起動（String は ["val"] 形式で渡す仕様）
-    params = {
-        "AlarmName":  [comp_name],
-        "InstanceId": [instance_id]
-    }
-    kwargs = dict(DocumentName=RUNBOOK_NAME, DocumentVersion=RUNBOOK_VERSION, Parameters=params)
-    if AUTOMATION_ROLE_ARN:
-        kwargs["AutomationAssumeRole"] = AUTOMATION_ROLE_ARN
-
-    log.info({"ssm_params": params})
-    resp = ssm.start_automation_execution(**kwargs)
-
-    return {
-        "ok": True,
-        "AutomationExecutionId": resp["AutomationExecutionId"],
-        "AlarmName": comp_name,
-        "InstanceId": instance_id
-    }
+    return {"status": "ok", "instances": instance_ids}
