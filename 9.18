@@ -1,0 +1,46 @@
+ルール
+{
+  "source": ["aws.cloudwatch"],
+  "detail-type": ["CloudWatch Alarm State Change"],
+  "detail": {
+    "state": { "value": ["ALARM"] },
+    "alarmName": [{ "prefix": "<ALARM_NAME_PREFIX>" }]
+  }
+}
+
+入力パス
+{
+  "iid": "$.detail.configuration.metrics[0].metricStat.metric.dimensions.InstanceId",
+  "an":  "$.detail.alarmName"
+}
+テンプレ
+{
+  "FailedInstanceId": "<iid>",
+  "AlarmName": "<an>",
+  "FailoverGroup": "<FAILOVER_GROUP>",
+  "AlarmNamePrefix": "<ALARM_NAME_PREFIX>"
+}
+
+
+Step Functions
+{
+  "Comment": "Failover orchestrator per single EC2",
+  "StartAt": "StartAutomation",
+  "States": {
+    "StartAutomation": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:ssm:startAutomationExecution",
+      "Parameters": {
+        "DocumentName": "<RUNBOOK_NAME>",
+        "ClientToken.$": "$$.Execution.Id",
+        "Parameters": {
+          "FailedInstanceId.$": "States.Array($.FailedInstanceId)",
+          "FailoverGroup.$": "States.Array($.FailoverGroup)",
+          "AlarmName.$": "States.Array($.AlarmName)",
+          "AlarmNamePrefix.$": "States.Array($.AlarmNamePrefix)"
+        }
+      },
+      "End": true
+    }
+  }
+}
