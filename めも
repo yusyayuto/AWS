@@ -1,120 +1,63 @@
-schemaVersion: '0.3'
-description: EC2の状態に応じてサービス停止→EC2停止まで自動化
-assumeRole: "{{ AutomationAssumeRole }}"
+# lambda_function.py
+import os, json, boto3
 
-parameters:
-  InstanceId:
-    type: String
-  ServiceNames:
-    type: StringList
-    default: []
-  SleepSecondsAfterService:
-    type: Integer
-    default: 5
-  AutomationAssumeRole:
-    type: String
-    description: "SSMが実行に使うロール(assumeRole)"
+cw  = boto3.client("cloudwatch")
+ssm = boto3.client("ssm")
 
-mainSteps:
-  # 1) まずEC2の現在状態を取得
-  - name: getInstanceState
-    action: aws:executeAwsApi
-    inputs:
-      Service: ec2
-      Api: DescribeInstances
-      InstanceIds:
-        - "{{ InstanceId }}"
-    outputs:
-      - Name: State
-        Selector: "$.Reservations[0].Instances[0].State.Name"
-        Type: String
+RUNBOOK_NAME        = os.environ["RUNBOOK_NAME"]
+RUNBOOK_VERSION     = os.environ.get("RUNBOOK_VERSION", "$LATEST")
+AUTOMATION_ROLE_ARN = os.environ.get("AUTOMATION_ROLE_ARN")  # なくても可
 
-  # 2) 初期状態で分岐（runningならサービス停止へ / stopped等なら終わりへ）
-  - name: branchOnInitial
-    action: aws:branch
-    inputs:
-      Choices:
-        - NextStep: stopServices
-          Variable: "{{ getInstanceState.State }}"
-          StringEquals: "running"
-      Default:
-        # ここで「最初から停止してた」場合の処理に飛ばす
-        NextStep: doneAlreadyStopped
+def handler(event, context):
+    # 1) 複合アラーム名を受け取る
+    detail = event.get("detail", {})
+    comp_name = detail.get("alarmName")
+    state     = (detail.get("state") or {}).get("value")
+    if not comp_name:
+        raise ValueError("detail.alarmName is required")
+    if state != "ALARM":
+        # 念のため：ALARM以外なら何もしない
+        return {"skipped": True, "reason": f"state={state}"}
 
-  # 3) 対象Windowsサービスを全部停止
-  - name: stopServices
-    action: aws:runCommand
-    inputs:
-      DocumentName: AWS-RunPowerShellScript
-      Parameters:
-        commands:
-          - |
-            $names = @({{ ServiceNames }})
-            if ($names.Count -gt 0) {
-              Stop-Service -Name $names -Force -ErrorAction SilentlyContinue
-            }
-            # ログ用に状態表示
-            if ($names.Count -gt 0) {
-              Get-Service -Name $names | Select Name,Status
-            } else { Write-Output "No services specified." }
+    # 2) 子アラームを列挙して InstanceId を抽出
+    #    ChildrenOfAlarmName を使うとルール文の自前パース不要
+    paginator = cw.get_paginator("describe_alarms")
+    instance_ids = set()
 
-  # 4) 5秒スリープ（パラメータ化）
-  - name: sleepAfterService
-    action: aws:sleep
-    inputs:
-      Duration: PT{{ SleepSecondsAfterService }}S
+    for page in paginator.paginate(ChildrenOfAlarmName=comp_name):
+        for m in page.get("MetricAlarms", []):
+            # 単一メトリクス型
+            dims = {d["Name"]: d["Value"] for d in m.get("Dimensions", [])}
+            if "InstanceId" in dims:
+                instance_ids.add(dims["InstanceId"])
+            # メトリクスマス/複合メトリクス型
+            for mm in m.get("Metrics", []):
+                metric = (mm.get("MetricStat") or {}).get("Metric") or {}
+                dims2  = {d["Name"]: d["Value"] for d in metric.get("Dimensions", [])}
+                if "InstanceId" in dims2:
+                    instance_ids.add(dims2["InstanceId"])
 
-  # 5) サービス状態の簡易確認（失敗しても継続したいなら onFailure で無視可）
-  - name: checkServices
-    action: aws:runCommand
-    onFailure: Continue
-    inputs:
-      DocumentName: AWS-RunPowerShellScript
-      Parameters:
-        commands:
-          - |
-            $names = @({{ ServiceNames }})
-            if ($names.Count -gt 0) {
-              Get-Service -Name $names | Select Name,Status
-            } else { Write-Output "No services to check." }
+    if not instance_ids:
+        raise RuntimeError(f"No InstanceId found in child alarms of composite '{comp_name}'")
+    if len(instance_ids) > 1:
+        # 設計前提：同一インスタンス監視。混在はエラーにして可視化
+        raise RuntimeError(f"Multiple InstanceIds found: {sorted(instance_ids)}")
 
-  # 6) EC2停止を実行
-  - name: stopInstance
-    action: aws:executeAwsApi
-    inputs:
-      Service: ec2
-      Api: StopInstances
-      InstanceIds:
-        - "{{ InstanceId }}"
+    instance_id = next(iter(instance_ids))
 
-  # 7) EC2が stopped になるまで待機
-  - name: waitForStopped
-    action: aws:waitForAwsResourceProperty
-    inputs:
-      Service: ec2
-      Api: DescribeInstances
-      InstanceIds:
-        - "{{ InstanceId }}"
-      PropertySelector: "$.Reservations[0].Instances[0].State.Name"
-      DesiredValues:
-        - stopped
+    # 3) SSM Automation を起動
+    params = {
+        "AlarmName": [comp_name],     # Runbook側は String → ["value"]
+        "InstanceId": [instance_id],  # 同上
+    }
+    kwargs = dict(DocumentName=RUNBOOK_NAME, DocumentVersion=RUNBOOK_VERSION, Parameters=params)
+    if AUTOMATION_ROLE_ARN:
+        kwargs["AutomationAssumeRole"] = AUTOMATION_ROLE_ARN
 
-  # 8) 最初から停止してた場合の着地点
-  - name: doneAlreadyStopped
-    action: aws:runCommand
-    isEnd: true
-    inputs:
-      DocumentName: AWS-RunPowerShellScript
-      Parameters:
-        commands:
-          - Write-Output "Instance was not running initially. No stop action performed."
-
-  # 9) 通常終了
-  - name: done
-    action: aws:runCommand
-    isEnd: true
-    inputs:
-      DocumentName: AWS-RunPowerShellScript
-      Parameters:
-        commands:
-          - Write-Output "Services handled and instance is now stopped."
+    resp = ssm.start_automation_execution(**kwargs)
+    return {
+        "ok": True,
+        "AutomationExecutionId": resp["AutomationExecutionId"],
+        "AlarmName": comp_name,
+        "InstanceId": instance_id
+    }
