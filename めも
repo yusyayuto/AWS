@@ -1,17 +1,1 @@
-[
-  {
-    "Id": "sfn-failover",
-    "Arn": "〈STATE_MACHINE_ARN〉",
-    "RoleArn": "〈EVENTBRIDGE_INVOKE_ROLE_ARN〉",
-    "InputTransformer": {
-      "InputPathsMap": {
-        "iid": "$.detail.configuration.metrics[0].metricStat.metric.dimensions.InstanceId",
-        "an": "$.detail.alarmName"
-      },
-      "InputTemplate": "{\"UnhealtyInstanceID\":\"<iid>\",\"AlarmName\":\"<an>\"}"
-    },
-    "StepFunctionsParameters": {
-      "Name": "〈FAILOVER_GROUP〉"
-    }
-  }
-]
+https://aws.amazon.com/jp/blogs/news/streamline-service-to-service-communication-during-deployments-with-amazon-ecs-service-connect/
