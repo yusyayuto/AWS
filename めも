@@ -1,7 +1,13 @@
-aws cloudwatch describe-alarms \
-  --children-of-alarm-name "<複合アラーム名>" \
-  --query 'MetricAlarms[].AlarmName'
-
-aws cloudwatch describe-alarms \
-  --alarm-names "<子アラーム名のひとつ>" \
-  --query 'MetricAlarms[0]'
+aws events put-targets \
+  --rule 〈既存ルール名〉 \
+  --targets '[
+    {
+      "Id": "sfn-failover",
+      "Arn": "〈STATE_MACHINE_ARN〉",
+      "RoleArn": "〈EVENTBRIDGE_INVOKE_ROLE_ARN〉",
+      "InputTransformer": { ... },
+      "StepFunctionsParameters": {
+        "Name": "〈FAILOVER_GROUP〉"   # ← これが実行名の固定
+      }
+    }
+  ]'
