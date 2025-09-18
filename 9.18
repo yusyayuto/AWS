@@ -1,46 +1,82 @@
-ルール
-{
-  "source": ["aws.cloudwatch"],
-  "detail-type": ["CloudWatch Alarm State Change"],
-  "detail": {
-    "state": { "value": ["ALARM"] },
-    "alarmName": [{ "prefix": "<ALARM_NAME_PREFIX>" }]
-  }
-}
+:: ====== ここを書き換えてね ======
+set AWS_REGION=〈ap-northeast-1〉
+set ACCOUNT_ID=〈123456789012〉
 
-入力パス
-{
-  "iid": "$.detail.configuration.metrics[0].metricStat.metric.dimensions.InstanceId",
-  "an":  "$.detail.alarmName"
-}
-テンプレ
-{
-  "FailedInstanceId": "<iid>",
-  "AlarmName": "<an>",
-  "FailoverGroup": "<FAILOVER_GROUP>",
-  "AlarmNamePrefix": "<ALARM_NAME_PREFIX>"
-}
+:: EventBridge ルール名
+set RULE_NAME=〈cw-alarm-failover-webap-ec2A〉
 
+:: CloudWatchアラーム名のプレフィックス（前方一致）
+set ALARM_NAME_PREFIX=〈stg-sgn-pf-cwalarm-webap-〉
 
-Step Functions
+:: Step Functions ステートマシン ARN
+set STATE_MACHINE_ARN=〈arn:aws:states:ap-northeast-1:123456789012:stateMachine:FailoverOrchestrator〉
+
+:: EventBridge→Step Functions を起動するためのロールARN（既に作成済みとのこと）
+set EVENTBRIDGE_INVOKE_ROLE_ARN=〈arn:aws:iam::123456789012:role/evb-invoke-sfn-failover〉
+
+:: 多重起動を防ぐ固定の Execution name（= FailoverGroup）
+set FAILOVER_GROUP=〈stg-sgn-pf-webap-ec2A〉
+:: =================================
+
+echo {^
+ "source": ["aws.cloudwatch"],^
+ "detail-type": ["CloudWatch Alarm State Change"],^
+ "detail": {^
+   "state": { "value": ["ALARM"] },^
+   "alarmName": [ { "prefix": "%ALARM_NAME_PREFIX%" } ]^
+ }^
+} > "%TEMP%\eventpattern.json"
+
+aws events put-rule ^
+  --name "%RULE_NAME%" ^
+  --event-pattern file://%TEMP%\eventpattern.json ^
+  --region %AWS_REGION%
+
+echo [^
+  {^
+    "Id": "1",^
+    "Arn": "%STATE_MACHINE_ARN%",^
+    "RoleArn": "%EVENTBRIDGE_INVOKE_ROLE_ARN%",^
+    "InputTransformer": {^
+      "InputPathsMap": {^
+        "iid": "$.detail.configuration.metrics[0].metricStat.metric.dimensions.InstanceId"^
+      },^
+      "InputTemplate": "{\^"UnhealtyInstanceID\^":\^"<iid>\^"}"^
+    },^
+    "StepFunctionsParameters": {^
+      "Name": "%FAILOVER_GROUP%"^
+    }^
+  }^
+] > "%TEMP%\targets.json"
+
+aws events put-targets ^
+  --rule "%RULE_NAME%" ^
+  --targets file://%TEMP%\targets.json ^
+  --region %AWS_REGION%
+
 {
-  "Comment": "Failover orchestrator per single EC2",
-  "StartAt": "StartAutomation",
+  "Comment": "Failover orchestrator (only pass UnhealtyInstanceID to SSM Automation)",
+  "StartAt": "GenUUID",
   "States": {
+    "GenUUID": {
+      "Type": "Pass",
+      "Parameters": { "uuid.$": "States.UUID()" },
+      "ResultPath": "$.idempotency",
+      "Next": "StartAutomation"
+    },
     "StartAutomation": {
       "Type": "Task",
       "Resource": "arn:aws:states:::aws-sdk:ssm:startAutomationExecution",
       "Parameters": {
-        "DocumentName": "<RUNBOOK_NAME>",
-        "ClientToken.$": "$$.Execution.Id",
+        "DocumentName": "〈RUNBOOK_NAME〉",
+        "ClientToken.$": "$.idempotency.uuid",
         "Parameters": {
-          "FailedInstanceId.$": "States.Array($.FailedInstanceId)",
-          "FailoverGroup.$": "States.Array($.FailoverGroup)",
-          "AlarmName.$": "States.Array($.AlarmName)",
-          "AlarmNamePrefix.$": "States.Array($.AlarmNamePrefix)"
+          "UnhealtyInstanceID.$": "States.Array($.UnhealtyInstanceID)"
         }
       },
       "End": true
     }
   }
 }
+
+
