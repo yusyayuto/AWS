@@ -1,13 +1,17 @@
-aws events put-targets \
-  --rule 〈既存ルール名〉 \
-  --targets '[
-    {
-      "Id": "sfn-failover",
-      "Arn": "〈STATE_MACHINE_ARN〉",
-      "RoleArn": "〈EVENTBRIDGE_INVOKE_ROLE_ARN〉",
-      "InputTransformer": { ... },
-      "StepFunctionsParameters": {
-        "Name": "〈FAILOVER_GROUP〉"   # ← これが実行名の固定
-      }
+[
+  {
+    "Id": "sfn-failover",
+    "Arn": "〈STATE_MACHINE_ARN〉",
+    "RoleArn": "〈EVENTBRIDGE_INVOKE_ROLE_ARN〉",
+    "InputTransformer": {
+      "InputPathsMap": {
+        "iid": "$.detail.configuration.metrics[0].metricStat.metric.dimensions.InstanceId",
+        "an": "$.detail.alarmName"
+      },
+      "InputTemplate": "{\"UnhealtyInstanceID\":\"<iid>\",\"AlarmName\":\"<an>\"}"
+    },
+    "StepFunctionsParameters": {
+      "Name": "〈FAILOVER_GROUP〉"
     }
-  ]'
+  }
+]
