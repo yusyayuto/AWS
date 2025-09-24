@@ -1,16 +1,28 @@
-aws cloudwatch describe-alarms ^
-  --children-of-alarm-name "複合アラーム名" ^
-  --query "MetricAlarms[*].{Name:AlarmName,State:StateValue,Metric:MetricName,Dimensions:Dimensions}"
+import json, boto3, os
+cw  = boto3.client("cloudwatch")
+ssm = boto3.client("ssm")
 
-aws cloudwatch describe-alarms ^
-  --children-of-alarm-name "複合アラーム名" ^
-  --query "MetricAlarms[].{
-    Name: AlarmName,
-    State: StateValue,
-    Metric: (MetricName || Metrics[0].MetricStat.Metric.MetricName),
-    InstanceIds: (
-      (Dimensions[?Name==`InstanceId`].Value) ||
-      (Metrics[].MetricStat.Metric.Dimensions[?Name==`InstanceId`].Value)
+DOC  = os.environ.get("AUTOMATION_DOC")  # 例: My-EC2-Recover
+P_IID = os.environ.get("PARAM_KEY_INSTANCE_ID", "InstanceId")
+P_ALM = os.environ.get("PARAM_KEY_COMPOSITE",  "CompositeAlarmName")
+
+def lambda_handler(event, _):
+    comp = event["detail"]["alarmName"]                       # 複合アラーム名
+    reason = json.loads(event["detail"]["state"]["reasonData"])
+    # 子アラーム 1 個だけ採用（先頭）
+    child_arn = reason["triggeringAlarms"][0]["arn"]
+    child = child_arn.split(":alarm:", 1)[1]                  # 子アラーム名
+
+    # 子アラームから InstanceId を 1 つ取得
+    r = cw.describe_alarms(AlarmNames=[child])
+    dims = r["MetricAlarms"][0].get("Dimensions", [])
+    iid  = next((d["Value"] for d in dims if d.get("Name")=="InstanceId"), None)
+    if not iid:
+        raise RuntimeError(f"No InstanceId in alarm: {child}")
+
+    # SSM Automation 起動（最小）
+    ssm.start_automation_execution(
+        DocumentName=DOC,
+        Parameters={P_IID: [iid], P_ALM: [comp]}
     )
-  }" ^
-  --output table
+    return {"status":"started", "instanceId":iid, "childAlarm":child, "composite":comp}
