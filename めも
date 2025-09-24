@@ -1,3 +1,16 @@
 aws cloudwatch describe-alarms ^
   --children-of-alarm-name "複合アラーム名" ^
   --query "MetricAlarms[*].{Name:AlarmName,State:StateValue,Metric:MetricName,Dimensions:Dimensions}"
+
+aws cloudwatch describe-alarms ^
+  --children-of-alarm-name "複合アラーム名" ^
+  --query "MetricAlarms[].{
+    Name: AlarmName,
+    State: StateValue,
+    Metric: (MetricName || Metrics[0].MetricStat.Metric.MetricName),
+    InstanceIds: (
+      (Dimensions[?Name==`InstanceId`].Value) ||
+      (Metrics[].MetricStat.Metric.Dimensions[?Name==`InstanceId`].Value)
+    )
+  }" ^
+  --output table
