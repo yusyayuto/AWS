@@ -1,28 +1,197 @@
-import json, boto3, os
-cw  = boto3.client("cloudwatch")
-ssm = boto3.client("ssm")
+- name: loopUpdateChildAlarms
+  action: aws:loop
+  nextStep: modifyRecordSets         # ← ループが終わったら次へ
+  isEnd: false
+  inputs:
+    Items: "{{ getChildAlarms.ChildAlarmNames }}"   # 子アラーム名のリストをそのまま回す
+    MaxIterations: 50
+    Steps:
 
-DOC  = os.environ.get("AUTOMATION_DOC")  # 例: My-EC2-Recover
-P_IID = os.environ.get("PARAM_KEY_INSTANCE_ID", "InstanceId")
-P_ALM = os.environ.get("PARAM_KEY_COMPOSITE",  "CompositeAlarmName")
+      # 子アラームの定義を取得（PutMetricAlarmの必須項目を全てoutputsへ）
+      - name: getChildAlarmParams
+        action: aws:executeAwsApi
+        isEnd: false
+        inputs:
+          Service: cloudwatch
+          Api: DescribeAlarms
+          AlarmNames:
+            - "{{ item }}"
+        outputs:
+          - Name: Namespace
+            Selector: "$.MetricAlarms[0].Namespace"
+            Type: String
+          - Name: MetricName
+            Selector: "$.MetricAlarms[0].MetricName"
+            Type: String
+          - Name: Dimensions
+            Selector: "$.MetricAlarms[0].Dimensions"
+            Type: MapList
+          - Name: Statistic
+            Selector: "$.MetricAlarms[0].Statistic"
+            Type: String
+          - Name: ExtendedStatistic
+            Selector: "$.MetricAlarms[0].ExtendedStatistic"
+            Type: String
+          - Name: Period
+            Selector: "$.MetricAlarms[0].Period"
+            Type: String
+          - Name: EvaluationPeriods
+            Selector: "$.MetricAlarms[0].EvaluationPeriods"
+            Type: String
+          - Name: DatapointsToAlarm
+            Selector: "$.MetricAlarms[0].DatapointsToAlarm"
+            Type: String
+          - Name: Threshold
+            Selector: "$.MetricAlarms[0].Threshold"
+            Type: String
+          - Name: ComparisonOperator
+            Selector: "$.MetricAlarms[0].ComparisonOperator"
+            Type: String
+          - Name: TreatMissingData
+            Selector: "$.MetricAlarms[0].TreatMissingData"
+            Type: String
+          - Name: EvaluateLowSampleCountPercentile
+            Selector: "$.MetricAlarms[0].EvaluateLowSampleCountPercentile"
+            Type: String
+          - Name: Unit
+            Selector: "$.MetricAlarms[0].Unit"
+            Type: String
+          - Name: AlarmDescription
+            Selector: "$.MetricAlarms[0].AlarmDescription"
+            Type: String
+          - Name: ActionsEnabled
+            Selector: "$.MetricAlarms[0].ActionsEnabled"
+            Type: String
+          - Name: OKActions
+            Selector: "$.MetricAlarms[0].OKActions"
+            Type: StringList
+          - Name: AlarmActions
+            Selector: "$.MetricAlarms[0].AlarmActions"
+            Type: StringList
+          - Name: InsufficientDataActions
+            Selector: "$.MetricAlarms[0].InsufficientDataActions"
+            Type: StringList
 
-def lambda_handler(event, _):
-    comp = event["detail"]["alarmName"]                       # 複合アラーム名
-    reason = json.loads(event["detail"]["state"]["reasonData"])
-    # 子アラーム 1 個だけ採用（先頭）
-    child_arn = reason["triggeringAlarms"][0]["arn"]
-    child = child_arn.split(":alarm:", 1)[1]                  # 子アラーム名
+      # Dimensions の InstanceId が一致する場合のみ新IDへ置換
+      - name: modifyIfMatch
+        action: aws:executeScript
+        nextStep: maybePutChildAlarm
+        isEnd: false
+        inputs:
+          Runtime: python3.11
+          Handler: handler
+          Script: |
+            def to_bool(v):
+                if isinstance(v, bool): return v
+                if isinstance(v, str): return v.lower() == "true"
+                return bool(v)
 
-    # 子アラームから InstanceId を 1 つ取得
-    r = cw.describe_alarms(AlarmNames=[child])
-    dims = r["MetricAlarms"][0].get("Dimensions", [])
-    iid  = next((d["Value"] for d in dims if d.get("Name")=="InstanceId"), None)
-    if not iid:
-        raise RuntimeError(f"No InstanceId in alarm: {child}")
+            def handler(event, context):
+                dims = event.get("Dimensions") or []
+                oldid = event["OldInstanceId"]
+                newid = event["NewInstanceId"]
+                modified = False
+                for d in dims:
+                    if d.get("Name") == "InstanceId" and d.get("Value") == oldid:
+                        d["Value"] = newid
+                        modified = True
+                return {"Modified": modified, "Dimensions": dims}
+        InputPayload:
+          Dimensions: "{{ getChildAlarmParams.Dimensions }}"
+          OldInstanceId: "{{ UnhealthyInstanceId }}"
+          NewInstanceId: "{{ runInstances.InstanceId }}"
+        outputs:
+          - Name: Modified
+            Selector: "$.Modified"
+            Type: String
+          - Name: Dimensions
+            Selector: "$.Dimensions"
+            Type: MapList
 
-    # SSM Automation 起動（最小）
-    ssm.start_automation_execution(
-        DocumentName=DOC,
-        Parameters={P_IID: [iid], P_ALM: [comp]}
-    )
-    return {"status":"started", "instanceId":iid, "childAlarm":child, "composite":comp}
+      # 変更があるときだけ PutMetricAlarm へ
+      - name: maybePutChildAlarm
+        action: aws:branch
+        isEnd: false
+        inputs:
+          Choices:
+            - NextStep: putChildAlarm
+              Variable: "{{ modifyIfMatch.Modified }}"
+              StringEquals: "True"
+          Default: skipPutChildAlarm
+
+      # PutMetricAlarm：必須項目を全て再指定し、Dimensionsだけ差し替え
+      - name: putChildAlarm
+        action: aws:executeScript
+        isEnd: false
+        inputs:
+          Runtime: python3.11
+          Handler: handler
+          Script: |
+            import boto3
+            def _int(v):
+                try: return int(v)
+                except: return None
+            def _float(v):
+                try: return float(v)
+                except: return None
+            def handler(event, context):
+                cw = boto3.client("cloudwatch")
+                req = {
+                  "AlarmName": event["AlarmName"],
+                  "AlarmDescription": event.get("AlarmDescription"),
+                  "ActionsEnabled": (event.get("ActionsEnabled","true").lower()=="true"),
+                  "OKActions": event.get("OKActions") or [],
+                  "AlarmActions": event.get("AlarmActions") or [],
+                  "InsufficientDataActions": event.get("InsufficientDataActions") or [],
+                  "Namespace": event.get("Namespace"),
+                  "MetricName": event.get("MetricName"),
+                  "Dimensions": event.get("Dimensions") or [],
+                  "Period": _int(event.get("Period")),
+                  "EvaluationPeriods": _int(event.get("EvaluationPeriods")),
+                  "DatapointsToAlarm": _int(event.get("DatapointsToAlarm")) if event.get("DatapointsToAlarm") not in (None,"") else None,
+                  "Threshold": _float(event.get("Threshold")),
+                  "ComparisonOperator": event.get("ComparisonOperator"),
+                  "TreatMissingData": event.get("TreatMissingData"),
+                  "EvaluateLowSampleCountPercentile": event.get("EvaluateLowSampleCountPercentile"),
+                  "Unit": event.get("Unit")
+                }
+                # Statistic / ExtendedStatistic はどちらか一方のみ
+                if event.get("ExtendedStatistic"):
+                    req["ExtendedStatistic"] = event["ExtendedStatistic"]
+                elif event.get("Statistic"):
+                    req["Statistic"] = event["Statistic"]
+                # None を落としてから呼ぶ
+                req = {k:v for k,v in req.items() if v is not None}
+                cw.put_metric_alarm(**req)
+                return {"ok": True}
+        InputPayload:
+          AlarmName: "{{ item }}"
+          AlarmDescription: "{{ getChildAlarmParams.AlarmDescription }}"
+          ActionsEnabled: "{{ getChildAlarmParams.ActionsEnabled }}"
+          OKActions: "{{ getChildAlarmParams.OKActions }}"
+          AlarmActions: "{{ getChildAlarmParams.AlarmActions }}"
+          InsufficientDataActions: "{{ getChildAlarmParams.InsufficientDataActions }}"
+          Namespace: "{{ getChildAlarmParams.Namespace }}"
+          MetricName: "{{ getChildAlarmParams.MetricName }}"
+          Dimensions: "{{ modifyIfMatch.Dimensions }}"
+          Period: "{{ getChildAlarmParams.Period }}"
+          EvaluationPeriods: "{{ getChildAlarmParams.EvaluationPeriods }}"
+          DatapointsToAlarm: "{{ getChildAlarmParams.DatapointsToAlarm }}"
+          Threshold: "{{ getChildAlarmParams.Threshold }}"
+          ComparisonOperator: "{{ getChildAlarmParams.ComparisonOperator }}"
+          TreatMissingData: "{{ getChildAlarmParams.TreatMissingData }}"
+          EvaluateLowSampleCountPercentile: "{{ getChildAlarmParams.EvaluateLowSampleCountPercentile }}"
+          Unit: "{{ getChildAlarmParams.Unit }}"
+          Statistic: "{{ getChildAlarmParams.Statistic }}"
+          ExtendedStatistic: "{{ getChildAlarmParams.ExtendedStatistic }}"
+
+      # 変更なし（NOP）
+      - name: skipPutChildAlarm
+        action: aws:executeScript
+        isEnd: false
+        inputs:
+          Runtime: python3.11
+          Handler: handler
+          Script: |
+            def handler(event, context):
+                return {"skipped": True}
