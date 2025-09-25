@@ -3,14 +3,21 @@ import json, boto3, os
 cw  = boto3.client("cloudwatch")
 ssm = boto3.client("ssm")
 
-DOC  = os.environ.get("AUTOMATION_DOC")  # 例: My-EC2-Recover
-P_IID = os.environ.get("PARAM_KEY_INSTANCE_ID", "InstanceId")
-P_ALM = os.environ.get("PARAM_KEY_COMPOSITE",  "CompositeAlarmName")
+DOC  = os.environ["AUTOMATION_DOC"]  # 例: My-EC2-Recover
+P_IID = os.environ["PARAM_KEY_INSTANCE_ID"]  # 例: InstanceId
+P_ALM = os.environ["PARAM_KEY_COMPOSITE"]    # 例: CompositeAlarmName
 
 def lambda_handler(event, _):
+    # ★ 追加：本当に「ALARMに遷移」したときだけ動くガード
+    cur = event["detail"]["state"]["value"]                    # 例: "ALARM"
+    prev = event["detail"].get("previousState", {}).get("value")  # 例: "OK" or "ALARM"
+    if not (cur == "ALARM" and prev != "ALARM"):
+        # すでに ALARM 中の“更新”（ALARM→ALARM）は無視
+        return {"status": "ignored", "reason": "not a transition into ALARM", "current": cur, "previous": prev}
+
     comp = event["detail"]["alarmName"]                       # 複合アラーム名
     reason = json.loads(event["detail"]["state"]["reasonData"])
-    
+
     # 子アラーム 1 個だけ採用（先頭）
     child_arn = reason["triggeringAlarms"][0]["arn"]
     child = child_arn.split(":alarm:", 1)[1]                  # 子アラーム名
@@ -22,11 +29,11 @@ def lambda_handler(event, _):
     if not iid:
         raise RuntimeError(f"No InstanceId in alarm: {child}")
 
-    # SSM Automation 起動
+    # SSM Automation 起動（同一イベント再配信は ClientToken で抑止）
     resp = ssm.start_automation_execution(
         DocumentName=DOC,
         Parameters={P_IID: [iid], P_ALM: [comp]},
-        ClientToken=event.get("id")  # ★ 同じイベントの再配信を抑止
+        ClientToken=event.get("id")
     )
 
     return {
