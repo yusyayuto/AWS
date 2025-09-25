@@ -1,17 +1,41 @@
+# Runtime: Python 3.11
+# 目的:
+#  - フェイルオーバー後に、複合アラームへ含まれる「全ての子アラーム」
+#    ＋ タグ(例: RelatedAlarm=<複合名>)で紐づいた「その他アラーム（CPU/メモリ/ディスク等）」の
+#    Dimensions.InstanceId を 旧→新 に一括置換して PutMetricAlarm で更新する。
+#
+# 期待入力(event):
+# {
+#   "CompositeAlarmName": "stg-sgn-pf-cmp-webap",  # 複合アラーム名（必須）
+#   "OldInstanceId": "i-xxxxxxxxxxxxxxxxx",        # 旧インスタンスID（必須）
+#   "NewInstanceId": "i-yyyyyyyyyyyyyyyyy",        # 新インスタンスID（必須）
+#   "TagKey": "RelatedAlarm",                      # 省略可（env TAG_KEY か "RelatedAlarm"）
+#   "TagValue": "stg-sgn-pf-cmp-webap"             # 省略可（env TAG_VALUE か CompositeAlarmName）
+# }
+#
+# 必要IAM(最小):
+# - cloudwatch:DescribeAlarms
+# - cloudwatch:PutMetricAlarm
+# - tag:GetResources
+# - logs:CreateLogGroup, logs:CreateLogStream, logs:PutLogEvents
+
 import boto3
 import re
 import json
 import os
 import traceback
+from typing import List, Dict, Any, Tuple
 
-cw = boto3.client("cloudwatch")
+cw  = boto3.client("cloudwatch")
+rgt = boto3.client("resourcegroupstaggingapi")
+
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
+DEFAULT_TAG_KEY = os.environ.get("TAG_KEY", "RelatedAlarm")
+DEFAULT_TAG_VALUE = os.environ.get("TAG_VALUE")  # 未指定なら Composite 名を既定にする
 
-def log(level, msg, **kw):
-    if level == "ERROR":
-        print(json.dumps({"level": level, "msg": msg, **kw}))
-    elif LOG_LEVEL in ("DEBUG",):
-        print(json.dumps({"level": level, "msg": msg, **kw}))
+def _log(level: str, msg: str, **kw):
+    if level == "ERROR" or LOG_LEVEL == "DEBUG":
+        print(json.dumps({"level": level, "msg": msg, **kw}, ensure_ascii=False))
 
 def _as_int(v):
     try: return int(v)
@@ -26,7 +50,8 @@ def _as_bool(v):
     if isinstance(v, str):  return v.lower() == "true"
     return bool(v) if v is not None else None
 
-def _replace_iid_in_dims(dims, oldi, newi):
+def _replace_iid_in_dims(dims: List[Dict[str, Any]], oldi: str, newi: str) -> Tuple[bool, List[Dict[str, Any]]]:
+    """Dimensions 内の InstanceId=oldi を newi に置換。ヒット有無と新配列を返す"""
     if not dims: return False, dims
     hit = False
     for d in dims:
@@ -35,30 +60,50 @@ def _replace_iid_in_dims(dims, oldi, newi):
             hit = True
     return hit, dims
 
-def _list_children(composite_name: str):
-    # 1st: ChildrenOfAlarmName（未サポート環境では例外/空）
+def _list_children_of_composite(composite_name: str) -> List[str]:
+    """複合アラーム配下の子(メトリックアラーム名)一覧。ChildrenOfAlarmName→AlarmRule解析の順に試す"""
+    # 1) ChildrenOfAlarmName（環境により未サポートのことがある）
     try:
         out = cw.describe_alarms(ChildrenOfAlarmName=composite_name)
         names = [a["AlarmName"] for a in out.get("MetricAlarms", [])]
         if names:
             return names
     except Exception as e:
-        log("DEBUG", "ChildrenOfAlarmName not usable; fallback to AlarmRule parsing.", error=str(e))
+        _log("DEBUG", "ChildrenOfAlarmName not usable; fallback to AlarmRule parsing.", error=str(e), composite=composite_name)
 
-    # 2nd: Composite の AlarmRule を解析（ALARM('name') を抽出）
+    # 2) Composite の AlarmRule を正規表現で解析（例: ALARM('child-a') OR ALARM('child-b') ...）
     try:
         r = cw.describe_alarms(AlarmNames=[composite_name])
         comps = r.get("CompositeAlarms", [])
         if not comps:
             return []
         rule = comps[0].get("AlarmRule", "")
-        # 例: ALARM('child-a') OR ALARM('child-b') AND NOT ALARM('child-c')
         return re.findall(r"ALARM\('([^']+)'\)", rule)
     except Exception as e:
-        log("ERROR", "Failed to parse AlarmRule.", composite=composite_name, error=str(e))
+        _log("ERROR", "Failed to parse AlarmRule.", composite=composite_name, error=str(e))
         return []
 
-def _put_metric_alarm_single(ma, dims):
+def _list_alarms_by_tag(tag_key: str, tag_value: str) -> List[str]:
+    """Resource Groups Tagging API でタグに一致する CloudWatch アラーム名を列挙"""
+    names: List[str] = []
+    token: str = ""
+    while True:
+        resp = rgt.get_resources(
+            ResourceTypeFilters=['cloudwatch:alarm'],
+            TagFilters=[{'Key': tag_key, 'Values': [tag_value]}],
+            PaginationToken=token
+        )
+        for m in resp.get('ResourceTagMappingList', []):
+            arn = m['ResourceARN']  # arn:aws:cloudwatch:ap-northeast-1:123456789012:alarm:AlarmName
+            name = arn.split(':alarm:', 1)[1]
+            names.append(name)
+        token = resp.get('PaginationToken') or ""
+        if not token:
+            break
+    return names
+
+def _put_metric_alarm_single(ma: Dict[str, Any], dims: List[Dict[str, Any]]):
+    """単一メトリクスの再定義（必須項目を全指定）"""
     req = {
         "AlarmName": ma["AlarmName"],
         "AlarmDescription": ma.get("AlarmDescription"),
@@ -76,7 +121,7 @@ def _put_metric_alarm_single(ma, dims):
         "ComparisonOperator": ma.get("ComparisonOperator"),
         "TreatMissingData": ma.get("TreatMissingData"),
         "EvaluateLowSampleCountPercentile": ma.get("EvaluateLowSampleCountPercentile"),
-        "Unit": ma.get("Unit")
+        "Unit": ma.get("Unit"),
     }
     if ma.get("ExtendedStatistic"):
         req["ExtendedStatistic"] = ma["ExtendedStatistic"]
@@ -85,7 +130,8 @@ def _put_metric_alarm_single(ma, dims):
     req = {k: v for k, v in req.items() if v is not None}
     cw.put_metric_alarm(**req)
 
-def _put_metric_alarm_math(ma, metrics):
+def _put_metric_alarm_math(ma: Dict[str, Any], metrics: List[Dict[str, Any]]):
+    """Metric Math / Metrics[] の再定義（必須項目を全指定）"""
     req = {
         "AlarmName": ma["AlarmName"],
         "AlarmDescription": ma.get("AlarmDescription"),
@@ -107,64 +153,89 @@ def _put_metric_alarm_math(ma, metrics):
     cw.put_metric_alarm(**req)
 
 def lambda_handler(event, context):
-    # 期待入力: CompositeAlarmName, OldInstanceId, NewInstanceId
+    """
+    入力:
+      CompositeAlarmName (str) : 複合アラーム名（必須）
+      OldInstanceId      (str) : 旧インスタンスID（必須）
+      NewInstanceId      (str) : 新インスタンスID（必須）
+      TagKey             (str) : 省略時は env TAG_KEY または "RelatedAlarm"
+      TagValue           (str) : 省略時は env TAG_VALUE または CompositeAlarmName
+    """
     comp = event.get("CompositeAlarmName")
     oldi = event.get("OldInstanceId")
     newi = event.get("NewInstanceId")
 
     if not (comp and oldi and newi):
-        # ここで例外を投げるとSSMが失敗するので、必ず 200 を返す
+        # 例外は投げずに返す（SSM側でUnhandledにしない）
         return {"ok": False, "reason": "missing required fields", "event": event}
 
-    updated, skipped, errors = [], [], []
+    tag_key   = (event.get("TagKey")   or DEFAULT_TAG_KEY or "RelatedAlarm")
+    tag_value = (event.get("TagValue") or DEFAULT_TAG_VALUE or comp)
 
-    try:
-        children = _list_children(comp)
-        log("DEBUG", "children resolved", composite=comp, children=children)
-        for name in children:
-            try:
-                d = cw.describe_alarms(AlarmNames=[name])
-                mals = d.get("MetricAlarms", [])
-                if not mals:
-                    skipped.append({"alarm": name, "reason": "not_metric_alarm"})
+    # ① 複合アラーム配下の子を列挙
+    children = _list_children_of_composite(comp)
+    # ② タグで選別されたその他アラームを列挙
+    tagged   = _list_alarms_by_tag(tag_key, tag_value)
+
+    # 和集合（重複排除）
+    targets = sorted(set(children) | set(tagged))
+    _log("DEBUG", "targets resolved", composite=comp, tagKey=tag_key, tagValue=tag_value, targets=targets)
+
+    updated: List[str] = []
+    skipped: List[Dict[str, Any]] = []
+    errors:  List[Dict[str, Any]] = []
+
+    for name in targets:
+        try:
+            d = cw.describe_alarms(AlarmNames=[name])
+            mals = d.get("MetricAlarms", [])
+            if not mals:
+                # Composite、または存在しない等
+                skipped.append({"alarm": name, "reason": "not_metric_alarm"})
+                continue
+            ma = mals[0]
+
+            # 形状判定：Metrics[] か 単一メトリクスか
+            if ma.get("Metrics"):
+                # Metric Math：各 MetricStat.Metric.Dimensions の InstanceId を置換
+                new_metrics = []
+                hit_any = False
+                for q in ma["Metrics"]:
+                    q2 = dict(q)
+                    ms = q2.get("MetricStat")
+                    if ms and ms.get("Metric") and ms["Metric"].get("Dimensions"):
+                        hit, dims2 = _replace_iid_in_dims(ms["Metric"]["Dimensions"], oldi, newi)
+                        if hit: hit_any = True
+                        ms["Metric"]["Dimensions"] = dims2
+                        q2["MetricStat"] = ms
+                    new_metrics.append(q2)
+                if not hit_any:
+                    skipped.append({"alarm": name, "reason": "no_instance_dim_match"})
                     continue
-                ma = mals[0]
+                _put_metric_alarm_math(ma, new_metrics)
 
-                if ma.get("Metrics"):
-                    # Metric Math: Metrics[] 各 MetricStat.Metric.Dimensions を置換
-                    new_metrics = []
-                    hit_any = False
-                    for q in ma["Metrics"]:
-                        q2 = dict(q)
-                        ms = q2.get("MetricStat")
-                        if ms and ms.get("Metric") and ms["Metric"].get("Dimensions"):
-                            hit, dims2 = _replace_iid_in_dims(ms["Metric"]["Dimensions"], oldi, newi)
-                            if hit: hit_any = True
-                            ms["Metric"]["Dimensions"] = dims2
-                            q2["MetricStat"] = ms
-                        new_metrics.append(q2)
-                    if not hit_any:
-                        skipped.append({"alarm": name, "reason": "no_instance_dim_match"})
-                        continue
-                    _put_metric_alarm_math(ma, new_metrics)
+            else:
+                # 単一メトリクス：Dimensions の InstanceId を置換
+                dims = list(ma.get("Dimensions", []))
+                hit, dims = _replace_iid_in_dims(dims, oldi, newi)
+                if not hit:
+                    skipped.append({"alarm": name, "reason": "no_instance_dim_match"})
+                    continue
+                _put_metric_alarm_single(ma, dims)
 
-                else:
-                    # 単一メトリクス: Dimensions を差し替え
-                    dims = list(ma.get("Dimensions", []))
-                    hit, dims = _replace_iid_in_dims(dims, oldi, newi)
-                    if not hit:
-                        skipped.append({"alarm": name, "reason": "no_instance_dim_match"})
-                        continue
-                    _put_metric_alarm_single(ma, dims)
+            updated.append(name)
 
-                updated.append(name)
+        except Exception as e:
+            errors.append({"alarm": name, "error": str(e), "trace": traceback.format_exc()})
 
-            except Exception as e:
-                errors.append({"alarm": name, "error": str(e), "trace": traceback.format_exc()})
-                # 1件失敗しても続行（SSMを落とさない）
-
-    except Exception as e:
-        # 子の列挙自体が失敗した場合も、SSMを落とさず返す
-        return {"ok": False, "phase": "list_children", "error": str(e), "trace": traceback.format_exc()}
-
-    return {"ok": True, "composite": comp, "updated": updated, "skipped": skipped, "errors": errors}
+    result = {
+        "ok": True,
+        "composite": comp,
+        "tagKey": tag_key,
+        "tagValue": tag_value,
+        "updated": updated,
+        "skipped": skipped,
+        "errors": errors
+    }
+    _log("DEBUG", "update result", **result)
+    return result
