@@ -1,6 +1,17 @@
-import boto3, re
+import boto3
+import re
+import json
+import os
+import traceback
 
 cw = boto3.client("cloudwatch")
+LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
+
+def log(level, msg, **kw):
+    if level == "ERROR":
+        print(json.dumps({"level": level, "msg": msg, **kw}))
+    elif LOG_LEVEL in ("DEBUG",):
+        print(json.dumps({"level": level, "msg": msg, **kw}))
 
 def _as_int(v):
     try: return int(v)
@@ -24,116 +35,136 @@ def _replace_iid_in_dims(dims, oldi, newi):
             hit = True
     return hit, dims
 
-def _list_children(composite_name: str) -> list[str]:
-    # まず ChildrenOfAlarmName（利用可能な環境ならこれでOK）
+def _list_children(composite_name: str):
+    # 1st: ChildrenOfAlarmName（未サポート環境では例外/空）
     try:
         out = cw.describe_alarms(ChildrenOfAlarmName=composite_name)
         names = [a["AlarmName"] for a in out.get("MetricAlarms", [])]
         if names:
             return names
-    except Exception:
-        pass
-    # フォールバック：Composite の AlarmRule から ALARM('name') を抽出
-    r = cw.describe_alarms(AlarmNames=[composite_name])
-    comps = r.get("CompositeAlarms", [])
-    if not comps:
+    except Exception as e:
+        log("DEBUG", "ChildrenOfAlarmName not usable; fallback to AlarmRule parsing.", error=str(e))
+
+    # 2nd: Composite の AlarmRule を解析（ALARM('name') を抽出）
+    try:
+        r = cw.describe_alarms(AlarmNames=[composite_name])
+        comps = r.get("CompositeAlarms", [])
+        if not comps:
+            return []
+        rule = comps[0].get("AlarmRule", "")
+        # 例: ALARM('child-a') OR ALARM('child-b') AND NOT ALARM('child-c')
+        return re.findall(r"ALARM\('([^']+)'\)", rule)
+    except Exception as e:
+        log("ERROR", "Failed to parse AlarmRule.", composite=composite_name, error=str(e))
         return []
-    rule = comps[0].get("AlarmRule", "")
-    return re.findall(r"ALARM\\('([^']+)'\\)", rule)
 
-def handler(event, context):
-    """
-    event = {
-      "CompositeAlarmName": "composite-alarm-name",
-      "OldInstanceId": "i-OLD",
-      "NewInstanceId": "i-NEW"
+def _put_metric_alarm_single(ma, dims):
+    req = {
+        "AlarmName": ma["AlarmName"],
+        "AlarmDescription": ma.get("AlarmDescription"),
+        "ActionsEnabled": _as_bool(ma.get("ActionsEnabled", True)),
+        "OKActions": ma.get("OKActions") or [],
+        "AlarmActions": ma.get("AlarmActions") or [],
+        "InsufficientDataActions": ma.get("InsufficientDataActions") or [],
+        "Namespace": ma.get("Namespace"),
+        "MetricName": ma.get("MetricName"),
+        "Dimensions": dims,
+        "Period": _as_int(ma.get("Period")),
+        "EvaluationPeriods": _as_int(ma.get("EvaluationPeriods")),
+        "DatapointsToAlarm": _as_int(ma.get("DatapointsToAlarm")) if ma.get("DatapointsToAlarm") is not None else None,
+        "Threshold": _as_float(ma.get("Threshold")),
+        "ComparisonOperator": ma.get("ComparisonOperator"),
+        "TreatMissingData": ma.get("TreatMissingData"),
+        "EvaluateLowSampleCountPercentile": ma.get("EvaluateLowSampleCountPercentile"),
+        "Unit": ma.get("Unit")
     }
-    """
-    comp = event["CompositeAlarmName"]
-    oldi = event["OldInstanceId"]
-    newi = event["NewInstanceId"]
+    if ma.get("ExtendedStatistic"):
+        req["ExtendedStatistic"] = ma["ExtendedStatistic"]
+    elif ma.get("Statistic"):
+        req["Statistic"] = ma["Statistic"]
+    req = {k: v for k, v in req.items() if v is not None}
+    cw.put_metric_alarm(**req)
 
-    targets = _list_children(comp)
-    updated, skipped = [], []
+def _put_metric_alarm_math(ma, metrics):
+    req = {
+        "AlarmName": ma["AlarmName"],
+        "AlarmDescription": ma.get("AlarmDescription"),
+        "ActionsEnabled": _as_bool(ma.get("ActionsEnabled", True)),
+        "OKActions": ma.get("OKActions") or [],
+        "AlarmActions": ma.get("AlarmActions") or [],
+        "InsufficientDataActions": ma.get("InsufficientDataActions") or [],
+        "EvaluationPeriods": _as_int(ma.get("EvaluationPeriods")),
+        "DatapointsToAlarm": _as_int(ma.get("DatapointsToAlarm")) if ma.get("DatapointsToAlarm") is not None else None,
+        "Threshold": _as_float(ma.get("Threshold")),
+        "ComparisonOperator": ma.get("ComparisonOperator"),
+        "TreatMissingData": ma.get("TreatMissingData"),
+        "EvaluateLowSampleCountPercentile": ma.get("EvaluateLowSampleCountPercentile"),
+        "Metrics": metrics
+    }
+    if ma.get("ThresholdMetricId"):
+        req["ThresholdMetricId"] = ma["ThresholdMetricId"]
+    req = {k: v for k, v in req.items() if v is not None}
+    cw.put_metric_alarm(**req)
 
-    for name in targets:
-        desc = cw.describe_alarms(AlarmNames=[name])
-        mals = desc.get("MetricAlarms", [])
-        if not mals:
-            skipped.append({"alarm": name, "reason": "not_metric_alarm"})
-            continue
-        ma = mals[0]
+def lambda_handler(event, context):
+    # 期待入力: CompositeAlarmName, OldInstanceId, NewInstanceId
+    comp = event.get("CompositeAlarmName")
+    oldi = event.get("OldInstanceId")
+    newi = event.get("NewInstanceId")
 
-        # 2系統対応：a) Metrics[]（Metric Math） b) 単一メトリクス
-        if ma.get("Metrics"):
-            metrics = []
-            hit_any = False
-            for q in ma["Metrics"]:
-                q = dict(q)
-                ms = q.get("MetricStat")
-                if ms and ms.get("Metric") and ms["Metric"].get("Dimensions"):
-                    hit, dims2 = _replace_iid_in_dims(ms["Metric"]["Dimensions"], oldi, newi)
-                    if hit: hit_any = True
-                    ms["Metric"]["Dimensions"] = dims2
-                    q["MetricStat"] = ms
-                metrics.append(q)
-            if not hit_any:
-                skipped.append({"alarm": name, "reason": "no_instance_dim_match"})
-                continue
+    if not (comp and oldi and newi):
+        # ここで例外を投げるとSSMが失敗するので、必ず 200 を返す
+        return {"ok": False, "reason": "missing required fields", "event": event}
 
-            req = {
-                "AlarmName": ma["AlarmName"],
-                "AlarmDescription": ma.get("AlarmDescription"),
-                "ActionsEnabled": _as_bool(ma.get("ActionsEnabled", True)),
-                "OKActions": ma.get("OKActions") or [],
-                "AlarmActions": ma.get("AlarmActions") or [],
-                "InsufficientDataActions": ma.get("InsufficientDataActions") or [],
-                "EvaluationPeriods": _as_int(ma.get("EvaluationPeriods")),
-                "DatapointsToAlarm": _as_int(ma.get("DatapointsToAlarm")) if ma.get("DatapointsToAlarm") is not None else None,
-                "Threshold": _as_float(ma.get("Threshold")),
-                "ComparisonOperator": ma.get("ComparisonOperator"),
-                "TreatMissingData": ma.get("TreatMissingData"),
-                "EvaluateLowSampleCountPercentile": ma.get("EvaluateLowSampleCountPercentile"),
-                "Metrics": metrics
-            }
-            if ma.get("ThresholdMetricId"):
-                req["ThresholdMetricId"] = ma["ThresholdMetricId"]
-            req = {k:v for k,v in req.items() if v is not None}
-            cw.put_metric_alarm(**req)
+    updated, skipped, errors = [], [], []
 
-        else:
-            dims = list(ma.get("Dimensions", []))
-            hit, dims = _replace_iid_in_dims(dims, oldi, newi)
-            if not hit:
-                skipped.append({"alarm": name, "reason": "no_instance_dim_match"})
-                continue
+    try:
+        children = _list_children(comp)
+        log("DEBUG", "children resolved", composite=comp, children=children)
+        for name in children:
+            try:
+                d = cw.describe_alarms(AlarmNames=[name])
+                mals = d.get("MetricAlarms", [])
+                if not mals:
+                    skipped.append({"alarm": name, "reason": "not_metric_alarm"})
+                    continue
+                ma = mals[0]
 
-            req = {
-                "AlarmName": ma["AlarmName"],
-                "AlarmDescription": ma.get("AlarmDescription"),
-                "ActionsEnabled": _as_bool(ma.get("ActionsEnabled", True)),
-                "OKActions": ma.get("OKActions") or [],
-                "AlarmActions": ma.get("AlarmActions") or [],
-                "InsufficientDataActions": ma.get("InsufficientDataActions") or [],
-                "Namespace": ma.get("Namespace"),
-                "MetricName": ma.get("MetricName"),
-                "Dimensions": dims,
-                "Period": _as_int(ma.get("Period")),
-                "EvaluationPeriods": _as_int(ma.get("EvaluationPeriods")),
-                "DatapointsToAlarm": _as_int(ma.get("DatapointsToAlarm")) if ma.get("DatapointsToAlarm") is not None else None,
-                "Threshold": _as_float(ma.get("Threshold")),
-                "ComparisonOperator": ma.get("ComparisonOperator"),
-                "TreatMissingData": ma.get("TreatMissingData"),
-                "EvaluateLowSampleCountPercentile": ma.get("EvaluateLowSampleCountPercentile"),
-                "Unit": ma.get("Unit")
-            }
-            if ma.get("ExtendedStatistic"):
-                req["ExtendedStatistic"] = ma["ExtendedStatistic"]
-            elif ma.get("Statistic"):
-                req["Statistic"] = ma["Statistic"]
-            req = {k:v for k,v in req.items() if v is not None}
-            cw.put_metric_alarm(**req)
+                if ma.get("Metrics"):
+                    # Metric Math: Metrics[] 各 MetricStat.Metric.Dimensions を置換
+                    new_metrics = []
+                    hit_any = False
+                    for q in ma["Metrics"]:
+                        q2 = dict(q)
+                        ms = q2.get("MetricStat")
+                        if ms and ms.get("Metric") and ms["Metric"].get("Dimensions"):
+                            hit, dims2 = _replace_iid_in_dims(ms["Metric"]["Dimensions"], oldi, newi)
+                            if hit: hit_any = True
+                            ms["Metric"]["Dimensions"] = dims2
+                            q2["MetricStat"] = ms
+                        new_metrics.append(q2)
+                    if not hit_any:
+                        skipped.append({"alarm": name, "reason": "no_instance_dim_match"})
+                        continue
+                    _put_metric_alarm_math(ma, new_metrics)
 
-        updated.append(name)
+                else:
+                    # 単一メトリクス: Dimensions を差し替え
+                    dims = list(ma.get("Dimensions", []))
+                    hit, dims = _replace_iid_in_dims(dims, oldi, newi)
+                    if not hit:
+                        skipped.append({"alarm": name, "reason": "no_instance_dim_match"})
+                        continue
+                    _put_metric_alarm_single(ma, dims)
 
-    return {"composite": comp, "updated": updated, "skipped": skipped}
+                updated.append(name)
+
+            except Exception as e:
+                errors.append({"alarm": name, "error": str(e), "trace": traceback.format_exc()})
+                # 1件失敗しても続行（SSMを落とさない）
+
+    except Exception as e:
+        # 子の列挙自体が失敗した場合も、SSMを落とさず返す
+        return {"ok": False, "phase": "list_children", "error": str(e), "trace": traceback.format_exc()}
+
+    return {"ok": True, "composite": comp, "updated": updated, "skipped": skipped, "errors": errors}
