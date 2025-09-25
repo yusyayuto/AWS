@@ -1,0 +1,526 @@
+schemaVersion: '0.3'
+description: Automates the process of managing AWS EC2 instances and backup
+parameters:
+  UnhealthyInstanceId:
+    type: String
+    description: (Required) The ID of the unhealthy EC2 instance
+    default: ''
+  BackupRoleArn:
+    type: String
+    default: arn:aws:iam::640168441533:role/stg-sgn-pf-iamrole-backup
+    description: (Required) The ARN of the AWS Backup role
+  AlarmName:
+    type: String
+    description: (Required) The name of the triggered alarm
+    default: ''
+  HostedZoneID:
+    type: String
+    default: Z02295062REH2B64SJIXO
+    description: (Optional) The Hosted Zone ID that contains the IP address of the unhealthy instance
+  UpdateAlarmLambdaName:
+    type: String
+    default: ＜子アラーム更新用Lambdaの関数名＞
+    description: (Required) Lambda that updates all child metric alarms' InstanceId from old to new
+assumeRole: arn:aws:iam::640168441533:role/stg-sgn-pf-iamrole-az-failure-recovery-ssmautomation1
+
+mainSteps:
+  - name: getLaunchTemplateId
+    action: aws:executeAwsApi
+    nextStep: getOtherAZLaunchTemplateId
+    isEnd: false
+    inputs:
+      Service: ec2
+      Api: DescribeTags
+      Filters:
+        - Name: resource-id
+          Values:
+            - '{{ UnhealthyInstanceId }}'
+        - Name: key
+          Values:
+            - aws:ec2launchtemplate:id
+    outputs:
+      - Name: LaunchTemplateId
+        Selector: $.Tags[0].Value
+        Type: String
+
+  - name: getOtherAZLaunchTemplateId
+    action: aws:executeAwsApi
+    nextStep: getTargetGroupName
+    isEnd: false
+    inputs:
+      Service: ec2
+      Api: DescribeLaunchTemplates
+      Filters:
+        - Name: tag:RelatedLaunchTemplateId
+          Values:
+            - '{{ getLaunchTemplateId.LaunchTemplateId }}'
+    outputs:
+      - Type: String
+        Selector: $.LaunchTemplates[0].LaunchTemplateId
+        Name: LaunchTemplateId
+
+  - name: getTargetGroupName
+    action: aws:executeAwsApi
+    nextStep: getBackupTag
+    isEnd: false
+    inputs:
+      Service: ec2
+      Api: DescribeTags
+      Filters:
+        - Name: resource-id
+          Values:
+            - '{{ UnhealthyInstanceId }}'
+        - Name: key
+          Values:
+            - TargetGroup
+    outputs:
+      - Name: TargetGroupName
+        Selector: $.Tags[0].Value
+        Type: String
+
+  - name: getBackupTag
+    action: aws:executeAwsApi
+    nextStep: getBackupVaultName
+    isEnd: false
+    inputs:
+      Service: ec2
+      Api: DescribeTags
+      Filters:
+        - Name: resource-id
+          Values:
+            - '{{ UnhealthyInstanceId }}'
+        - Name: key
+          Values:
+            - backup
+    outputs:
+      - Name: BackupTag
+        Selector: $.Tags[0].Value
+        Type: String
+
+  - name: getBackupVaultName
+    action: aws:executeScript
+    nextStep: getAmiArn
+    isEnd: false
+    inputs:
+      Runtime: python3.11
+      Handler: script_handler
+      Script: |-
+        def script_handler(event, context):
+          BackupTag = event['BackupTag']
+          if BackupTag.startswith("stg-pf-ec2-"):
+            return BackupTag.replace("stg-pf-ec2-", "stg-sgn-pf-buvalut-ec2-ebs-", 1)
+          else:
+            raise Exception("No backup tag starting with stg-pf-ec2- found.")
+      InputPayload:
+        BackupTag: '{{ getBackupTag.BackupTag }}'
+    outputs:
+      - Type: String
+        Selector: $.Payload
+        Name: BackupVaultName
+
+  - name: getAmiArn
+    action: aws:executeAwsApi
+    nextStep: extractAmiId
+    isEnd: false
+    inputs:
+      Service: backup
+      Api: DescribeProtectedResource
+      ResourceArn: arn:aws:ec2:{{ global:REGION }}:{{ global:ACCOUNT_ID }}:instance/{{ UnhealthyInstanceId }}
+    outputs:
+      - Name: AmiArn
+        Selector: $.LastRecoveryPointArn
+        Type: String
+
+  - name: extractAmiId
+    action: aws:executeScript
+    nextStep: getLaunchTemplateParameterName
+    isEnd: false
+    inputs:
+      Runtime: python3.11
+      Handler: script_handler
+      Script: |
+        import re
+        def script_handler(event, context):
+            arn = event['arn']
+            pattern = r'ami-[0-9a-fA-F]{8,}'
+            m = re.search(pattern, arn)
+            if m:
+                return {'amiId': m.group(0)}
+            raise Exception("No AMI ID found.")
+      InputPayload:
+        arn: '{{ getAmiArn.AmiArn }}'
+    outputs:
+      - Type: String
+        Selector: $.Payload.amiId
+        Name: amiId
+
+  - name: getLaunchTemplateParameterName
+    action: aws:executeScript
+    nextStep: putLaunchTemplateParameter
+    isEnd: false
+    inputs:
+      Runtime: python3.11
+      Handler: script_handler
+      Script: |
+        import boto3
+        ssm_client = boto3.client('ssm')
+        def script_handler(events, context):
+            launchtemplateid = events['launchtemplateid']
+            paginator = ssm_client.get_paginator('describe_parameters')
+            for page in paginator.paginate():
+                for parameter in page.get('Parameters', []):
+                    name = parameter['Name']
+                    tags = ssm_client.list_tags_for_resource(ResourceType='Parameter', ResourceId=name)['TagList']
+                    for tag in tags:
+                        if (tag['Key'] == "launchtemplateid" or tag['Key'] == "launchtemplateid-az-failure") and tag['Value'] == launchtemplateid:
+                            return {'Name': name}
+            raise Exception("No matching SSM parameter found for the given launch template ID.")
+      InputPayload:
+        launchtemplateid: '{{ getOtherAZLaunchTemplateId.LaunchTemplateId }}'
+    outputs:
+      - Type: String
+        Selector: $.Payload.Name
+        Name: ParameterName
+
+  - name: putLaunchTemplateParameter
+    action: aws:executeAwsApi
+    nextStep: targetGroupBranch1
+    isEnd: false
+    inputs:
+      Service: ssm
+      Api: PutParameter
+      Value: '{{ extractAmiId.amiId }}'
+      Type: String
+      Overwrite: true
+      DataType: aws:ec2:image
+      Name: '{{ getLaunchTemplateParameterName.ParameterName }}'
+
+  - name: targetGroupBranch1
+    action: aws:branch
+    inputs:
+      Choices:
+        - NextStep: getInstanceIp
+          Variable: '{{ getTargetGroupName.TargetGroupName }}'
+          Contains: '{ getTargetGroupName.TargetGroupName }'
+      Default: getTargetGroupArn
+
+  - name: getTargetGroupArn
+    action: aws:executeAwsApi
+    nextStep: deregisterTarget
+    isEnd: false
+    inputs:
+      Service: elbv2
+      Api: DescribeTargetGroups
+      Names:
+        - '{{ getTargetGroupName.TargetGroupName }}'
+    outputs:
+      - Type: String
+        Selector: $.TargetGroups[0].TargetGroupArn
+        Name: TargetGroupArn
+
+  - name: deregisterTarget
+    action: aws:executeAwsApi
+    nextStep: waitForDeregistration
+    isEnd: false
+    inputs:
+      Service: elbv2
+      Api: DeregisterTargets
+      Targets:
+        - Id: '{{ UnhealthyInstanceId }}'
+      TargetGroupArn: '{{ getTargetGroupArn.TargetGroupArn }}'
+
+  - name: waitForDeregistration
+    action: aws:executeScript
+    timeoutSeconds: 300
+    nextStep: getInstanceIp
+    isEnd: false
+    inputs:
+      Runtime: python3.11
+      Handler: wait_for_deregistration
+      Script: |
+        import time
+        import boto3
+        client = boto3.client('elbv2')
+        def wait_for_deregistration(events, context):
+            tg = events['TargetGroupArn']
+            iid = events['UnhealthyInstanceId']
+            while True:
+                resp = client.describe_target_health(TargetGroupArn=tg)
+                desc = resp['TargetHealthDescriptions']
+                if not any(d['Target']['Id']==iid for d in desc):
+                    return {"ok": True}
+                time.sleep(15)
+      InputPayload:
+        TargetGroupArn: '{{ getTargetGroupArn.TargetGroupArn }}'
+        UnhealthyInstanceId: '{{ UnhealthyInstanceId }}'
+
+  - name: getInstanceIp
+    action: aws:executeAwsApi
+    nextStep: getInstanceState
+    isEnd: false
+    inputs:
+      Service: ec2
+      Api: DescribeInstances
+      InstanceIds:
+        - '{{ UnhealthyInstanceId }}'
+    outputs:
+      - Type: String
+        Selector: $.Reservations[0].Instances[0].PrivateIpAddress
+        Name: PrivateIpAddress
+
+  - name: getInstanceState
+    action: aws:executeAwsApi
+    nextStep: InstanceStateBranch
+    isEnd: false
+    inputs:
+      Service: ec2
+      Api: DescribeInstances
+      InstanceIds:
+        - '{{ UnhealthyInstanceId }}'
+    outputs:
+      - Type: String
+        Selector: $.Reservations[0].Instances[0].State.Name
+        Name: State
+
+  - name: InstanceStateBranch
+    action: aws:branch
+    inputs:
+      Choices:
+        - NextStep: stopInstance
+          Variable: '{{ getInstanceState.State }}'
+          StringEquals: running
+      Default: runInstances
+
+  - name: stopInstance
+    action: aws:changeInstanceState
+    nextStep: waitForStop
+    isEnd: false
+    inputs:
+      InstanceIds:
+        - '{{ UnhealthyInstanceId }}'
+      DesiredState: stopped
+
+  - name: waitForStop
+    action: aws:waitForAwsResourceProperty
+    timeoutSeconds: 300
+    nextStep: runInstances
+    isEnd: false
+    inputs:
+      Service: ec2
+      Api: DescribeInstances
+      InstanceIds:
+        - '{{ UnhealthyInstanceId }}'
+      PropertySelector: $.Reservations[0].Instances[0].State.Name
+      DesiredValues:
+        - stopped
+
+  - name: runInstances
+    action: aws:executeAwsApi
+    nextStep: sleep
+    isEnd: false
+    inputs:
+      Service: ec2
+      Api: RunInstances
+      LaunchTemplate:
+        LaunchTemplateId: '{{ getOtherAZLaunchTemplateId.LaunchTemplateId }}'
+      MaxCount: 1
+      MinCount: 1
+    outputs:
+      - Name: InstanceId
+        Selector: $.Instances[0].InstanceId
+        Type: String
+      - Name: ImageId
+        Selector: $.Instances[0].ImageId
+        Type: String
+      - Name: InstanceType
+        Selector: $.Instances[0].InstanceType
+        Type: String
+
+  - name: sleep
+    action: aws:sleep
+    nextStep: waitForInstanceRunning
+    isEnd: false
+    inputs:
+      Duration: PT10S
+
+  - name: waitForInstanceRunning
+    action: aws:waitForAwsResourceProperty
+    timeoutSeconds: 300
+    nextStep: updateChildAlarmsByLambda
+    isEnd: false
+    inputs:
+      Service: ec2
+      Api: DescribeInstances
+      InstanceIds:
+        - '{{ runInstances.InstanceId }}'
+      PropertySelector: $.Reservations[0].Instances[0].State.Name
+      DesiredValues:
+        - running
+
+  # ここで子アラーム更新用Lambdaを1回呼ぶ（複合アラーム配下の全子アラームを旧→新へ差し替え）
+  - name: updateChildAlarmsByLambda
+    action: aws:invokeLambdaFunction
+    nextStep: targetGroupBranch2
+    isEnd: false
+    inputs:
+      FunctionName: '{{ UpdateAlarmLambdaName }}'
+      Payload: |
+        {
+          "CompositeAlarmName": "{{ AlarmName }}",
+          "OldInstanceId": "{{ UnhealthyInstanceId }}",
+          "NewInstanceId": "{{ runInstances.InstanceId }}"
+        }
+
+  - name: targetGroupBranch2
+    action: aws:branch
+    inputs:
+      Choices:
+        - NextStep: getNewInstanceIp
+          Variable: '{{ getTargetGroupName.TargetGroupName }}'
+          Contains: '{ getTargetGroupName.TargetGroupName }'
+      Default: registerTarget
+
+  - name: registerTarget
+    action: aws:executeAwsApi
+    nextStep: waitForRegistration
+    isEnd: false
+    inputs:
+      Service: elbv2
+      Api: RegisterTargets
+      Targets:
+        - Id: '{{ runInstances.InstanceId }}'
+      TargetGroupArn: '{{ getTargetGroupArn.TargetGroupArn }}'
+
+  - name: waitForRegistration
+    action: aws:executeScript
+    timeoutSeconds: 300
+    nextStep: getNewInstanceIp
+    isEnd: false
+    inputs:
+      Runtime: python3.11
+      Handler: wait_for_registration
+      Script: |
+        import time
+        import boto3
+        client = boto3.client('elbv2')
+        def wait_for_registration(events, context):
+            tg = events['TargetGroupArn']
+            iid = events['InstanceId']
+            while True:
+                resp = client.describe_target_health(TargetGroupArn=tg)
+                for d in resp['TargetHealthDescriptions']:
+                    if d['Target']['Id'] == iid and d['TargetHealth']['State'] == 'healthy':
+                        return {"ok": True}
+                time.sleep(15)
+      InputPayload:
+        InstanceId: '{{ runInstances.InstanceId }}'
+        TargetGroupArn: '{{ getTargetGroupArn.TargetGroupArn }}'
+
+  - name: getNewInstanceIp
+    action: aws:executeAwsApi
+    nextStep: modifyRecordSets
+    isEnd: false
+    inputs:
+      Service: ec2
+      Api: DescribeInstances
+      InstanceIds:
+        - '{{ runInstances.InstanceId }}'
+    outputs:
+      - Type: String
+        Selector: $.Reservations[0].Instances[0].PrivateIpAddress
+        Name: PrivateIpAddress
+
+  - name: modifyRecordSets
+    action: aws:executeScript
+    nextStep: Branch
+    isEnd: false
+    inputs:
+      Runtime: python3.11
+      Handler: modify_record_sets
+      Script: |
+        import boto3
+        def modify_record_sets(event,context):
+            hosted_zone_id = event['hostedZoneId']
+            old_ip = event['oldIp']
+            new_ip = event['newIp']
+            client = boto3.client('route53')
+            paginator = client.get_paginator('list_resource_record_sets')
+            changes = []
+            for page in paginator.paginate(HostedZoneId=hosted_zone_id):
+                for record_set in page['ResourceRecordSets']:
+                    if record_set['Type'] == 'A' and 'ResourceRecords' in record_set:
+                        for record in record_set['ResourceRecords']:
+                            if record['Value'] == old_ip:
+                                changes.append({
+                                  'Action': 'UPSERT',
+                                  'ResourceRecordSet': {
+                                    'Name': record_set['Name'],
+                                    'Type': 'A',
+                                    'TTL': record_set.get('TTL', 300),
+                                    'ResourceRecords': [{'Value': new_ip}]
+                                  }
+                                })
+                                break
+            return {'HostedZoneId': hosted_zone_id, 'Changes': changes, 'HasChanges': bool(changes)}
+      InputPayload:
+        hostedZoneId: '{{ HostedZoneID }}'
+        oldIp: '{{ getInstanceIp.PrivateIpAddress }}'
+        newIp: '{{ getNewInstanceIp.PrivateIpAddress }}'
+    outputs:
+      - Type: String
+        Selector: $.Payload.HostedZoneId
+        Name: HostedZoneId
+      - Type: MapList
+        Selector: $.Payload.Changes
+        Name: Changes
+      - Type: Boolean
+        Selector: $.Payload.HasChanges
+        Name: HasChanges
+
+  - name: Branch
+    action: aws:branch
+    inputs:
+      Choices:
+        - NextStep: UpdateRecordSets
+          Variable: '{{ modifyRecordSets.HasChanges }}'
+          BooleanEquals: true
+      Default: startBackup
+
+  - name: UpdateRecordSets
+    action: aws:executeAwsApi
+    nextStep: startBackup
+    isEnd: false
+    inputs:
+      Service: route53
+      Api: ChangeResourceRecordSets
+      ChangeBatch:
+        Changes: '{{ modifyRecordSets.Changes }}'
+      HostedZoneId: '{{ HostedZoneID }}'
+
+  - name: startBackup
+    action: aws:executeAwsApi
+    nextStep: waitForBackupCompletion
+    isEnd: false
+    inputs:
+      Service: backup
+      Api: StartBackupJob
+      BackupVaultName: '{{ getBackupVaultName.BackupVaultName }}'
+      ResourceArn: arn:aws:ec2:{{ global:REGION }}:{{ global:ACCOUNT_ID }}:instance/{{ runInstances.InstanceId }}
+      IamRoleArn: '{{ BackupRoleArn }}'
+    outputs:
+      - Type: String
+        Selector: $.BackupJobId
+        Name: BackupJobId
+
+  - name: waitForBackupCompletion
+    action: aws:waitForAwsResourceProperty
+    timeoutSeconds: 300
+    isEnd: true
+    inputs:
+      Service: backup
+      Api: DescribeBackupJob
+      BackupJobId: '{{ startBackup.BackupJobId }}'
+      PropertySelector: $.State
+      DesiredValues:
+        - COMPLETED
+        - FAILED
