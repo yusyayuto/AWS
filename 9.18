@@ -1,82 +1,706 @@
-:: ====== ここを書き換えてね ======
-set AWS_REGION=〈ap-northeast-1〉
-set ACCOUNT_ID=〈123456789012〉
+schemaVersion: "0.3"
+description: "EC2 AZフェイルオーバー（LT切替・TG/Route53更新・Backup・複合アラーム配下の子アラームInstanceId一括置換）"
+assumeRole: "arn:aws:iam::〈ACCOUNT_ID〉:role/〈AUTOMATION_ASSUME_ROLE〉"
 
-:: EventBridge ルール名
-set RULE_NAME=〈cw-alarm-failover-webap-ec2A〉
+parameters:
+  UnhealtyInstanceId:
+    type: String
+    description: "(Required) フェイルオーバー元の不健全EC2 InstanceId"
+  BackupRoleArn:
+    type: String
+    description: "(Required) AWS Backup の実行ロールARN"
+  AlarmName:
+    type: String
+    description: "(Required) 複合アラーム名（ChildrenOfAlarmName で子を取得）"
+  HostedZoneID:
+    type: String
+    description: "(Optional) 更新対象Aレコードが含まれるHosted Zone ID（空ならスキップ可）"
+    default: ""
 
-:: CloudWatchアラーム名のプレフィックス（前方一致）
-set ALARM_NAME_PREFIX=〈stg-sgn-pf-cwalarm-webap-〉
+mainSteps:
 
-:: Step Functions ステートマシン ARN
-set STATE_MACHINE_ARN=〈arn:aws:states:ap-northeast-1:123456789012:stateMachine:FailoverOrchestrator〉
+  # --- 旧EC2に付いたタグからLT/TargetGroup/Backup関連を引く ---
+  - name: getLaunchTemplateId
+    action: aws:executeAwsApi
+    nextStep: getOtherAZLaunchTemplateId
+    isEnd: false
+    inputs:
+      Service: ec2
+      Api: DescribeTags
+      Filters:
+        - Name: resource-id
+          Values: ["{{ UnhealtyInstanceId }}"]
+        - Name: key
+          Values: ["ec2launchtemplate:id"]
+    outputs:
+      - Name: LaunchTemplateId
+        Selector: "$.Tags[0].Value"
+        Type: String
 
-:: EventBridge→Step Functions を起動するためのロールARN（既に作成済みとのこと）
-set EVENTBRIDGE_INVOKE_ROLE_ARN=〈arn:aws:iam::123456789012:role/evb-invoke-sfn-failover〉
+  - name: getOtherAZLaunchTemplateId
+    action: aws:executeAwsApi
+    nextStep: getTargetGroupName
+    isEnd: false
+    inputs:
+      Service: ec2
+      Api: DescribeLaunchTemplates
+      Filters:
+        - Name: "tag:RelatedLaunchTemplateId"
+          Values: ["{{ getLaunchTemplateId.LaunchTemplateId }}"]
+    outputs:
+      - Name: LaunchTemplateId
+        Selector: "$.LaunchTemplates[0].LaunchTemplateId"
+        Type: String
 
-:: 多重起動を防ぐ固定の Execution name（= FailoverGroup）
-set FAILOVER_GROUP=〈stg-sgn-pf-webap-ec2A〉
-:: =================================
+  - name: getTargetGroupName
+    action: aws:executeAwsApi
+    nextStep: getBackupTag
+    isEnd: false
+    inputs:
+      Service: ec2
+      Api: DescribeTags
+      Filters:
+        - Name: resource-id
+          Values: ["{{ UnhealtyInstanceId }}"]
+        - Name: key
+          Values: ["TargetGroup"]
+    outputs:
+      - Name: TargetGroupName
+        Selector: "$.Tags[0].Value"
+        Type: String
 
-echo {^
- "source": ["aws.cloudwatch"],^
- "detail-type": ["CloudWatch Alarm State Change"],^
- "detail": {^
-   "state": { "value": ["ALARM"] },^
-   "alarmName": [ { "prefix": "%ALARM_NAME_PREFIX%" } ]^
- }^
-} > "%TEMP%\eventpattern.json"
+  - name: getBackupTag
+    action: aws:executeAwsApi
+    nextStep: getBackupVaultName
+    isEnd: false
+    inputs:
+      Service: ec2
+      Api: DescribeTags
+      Filters:
+        - Name: resource-id
+          Values: ["{{ UnhealtyInstanceId }}"]
+        - Name: key
+          Values: ["backup"]
+    outputs:
+      - Name: BackupTag
+        Selector: "$.Tags[0].Value"
+        Type: String
 
-aws events put-rule ^
-  --name "%RULE_NAME%" ^
-  --event-pattern file://%TEMP%\eventpattern.json ^
-  --region %AWS_REGION%
+  - name: getBackupVaultName
+    action: aws:executeScript
+    nextStep: getAmiArn
+    isEnd: false
+    inputs:
+      Runtime: python3.11
+      Handler: script_handler
+      Script: |
+        def script_handler(event, context):
+          backup_tag = event["BackupTag"]
+          # あなたの環境の命名規則に合わせて必要ならここを調整
+          if backup_tag.startswith("stg-pf-ec2-"):
+            return {"BackupVaultName": backup_tag.replace("stg-pf-ec2-", "stg-sgn-pf-buvalt-ec2-ebs-", 1)}
+          raise Exception("No backup tag starting with stg-pf-ec2- found.")
+    InputPayload:
+      BackupTag: "{{ getBackupTag.BackupTag }}"
+    outputs:
+      - Name: BackupVaultName
+        Selector: "$.BackupVaultName"
+        Type: String
 
-echo [^
-  {^
-    "Id": "1",^
-    "Arn": "%STATE_MACHINE_ARN%",^
-    "RoleArn": "%EVENTBRIDGE_INVOKE_ROLE_ARN%",^
-    "InputTransformer": {^
-      "InputPathsMap": {^
-        "iid": "$.detail.configuration.metrics[0].metricStat.metric.dimensions.InstanceId"^
-      },^
-      "InputTemplate": "{\^"UnhealtyInstanceID\^":\^"<iid>\^"}"^
-    },^
-    "StepFunctionsParameters": {^
-      "Name": "%FAILOVER_GROUP%"^
-    }^
-  }^
-] > "%TEMP%\targets.json"
+  # --- AWS Backup の保護対象から最新の復旧ポイント（AMI ARN）を得る → AMI ID抽出 ---
+  - name: getAmiArn
+    action: aws:executeAwsApi
+    nextStep: extractAmiId
+    isEnd: false
+    inputs:
+      Service: backup
+      Api: DescribeProtectedResource
+      ResourceArn: "arn:aws:ec2:{{ global:REGION }}:{{ global:ACCOUNT_ID }}:instance/{{ UnhealtyInstanceId }}"
+    outputs:
+      - Name: AmiArn
+        Selector: "$.LastRecoveryPointArn"
+        Type: String
 
-aws events put-targets ^
-  --rule "%RULE_NAME%" ^
-  --targets file://%TEMP%\targets.json ^
-  --region %AWS_REGION%
+  - name: extractAmiId
+    action: aws:executeScript
+    nextStep: getLaunchTemplateParameterName
+    isEnd: false
+    inputs:
+      Runtime: python3.11
+      Handler: script_handler
+      Script: |
+        import re
+        def script_handler(event, context):
+          arn = event["arn"]
+          m = re.search(r"ami-[0-9a-f]{8,}", arn)
+          if not m:
+            raise Exception("No AMI ID found in ARN.")
+          return {"amiId": m.group(0)}
+    InputPayload:
+      arn: "{{ getAmiArn.AmiArn }}"
+    outputs:
+      - Name: amiId
+        Selector: "$.amiId"
+        Type: String
 
-{
-  "Comment": "Failover orchestrator (only pass UnhealtyInstanceID to SSM Automation)",
-  "StartAt": "GenUUID",
-  "States": {
-    "GenUUID": {
-      "Type": "Pass",
-      "Parameters": { "uuid.$": "States.UUID()" },
-      "ResultPath": "$.idempotency",
-      "Next": "StartAutomation"
-    },
-    "StartAutomation": {
-      "Type": "Task",
-      "Resource": "arn:aws:states:::aws-sdk:ssm:startAutomationExecution",
-      "Parameters": {
-        "DocumentName": "〈RUNBOOK_NAME〉",
-        "ClientToken.$": "$.idempotency.uuid",
-        "Parameters": {
-          "UnhealtyInstanceID.$": "States.Array($.UnhealtyInstanceID)"
-        }
-      },
-      "End": true
-    }
-  }
-}
+  # --- SSMパラメータ（aws:ec2:image）をLTIDタグで特定してAMIを上書き ---
+  - name: getLaunchTemplateParameterName
+    action: aws:executeScript
+    nextStep: putLaunchTemplateParameter
+    isEnd: false
+    inputs:
+      Runtime: python3.11
+      Handler: script_handler
+      Script: |
+        import boto3
+        def script_handler(events, context):
+          ssm = boto3.client("ssm")
+          target_lt = events["launchtemplateid"]
+          paginator = ssm.get_paginator("describe_parameters")
+          for page in paginator.paginate():
+            for p in page.get("Parameters", []):
+              tags = ssm.list_tags_for_resource(ResourceType="Parameter", ResourceId=p["Name"])["TagList"]
+              for t in tags:
+                if (t.get("Key") in ("launchtemplateid", "launchtemplateid-az-failure")) and t.get("Value") == target_lt:
+                  return {"Name": p["Name"]}
+          raise Exception("No matching SSM parameter tagged with the target LaunchTemplateId.")
+    InputPayload:
+      launchtemplateid: "{{ getOtherAZLaunchTemplateId.LaunchTemplateId }}"
+    outputs:
+      - Name: ParameterName
+        Selector: "$.Name"
+        Type: String
 
+  - name: putLaunchTemplateParameter
+    action: aws:executeAwsApi
+    nextStep: targetGroupBranch1
+    isEnd: false
+    inputs:
+      Service: ssm
+      Api: PutParameter
+      Name: "{{ getLaunchTemplateParameterName.ParameterName }}"
+      Type: String
+      Value: "{{ extractAmiId.amiId }}"
+      Overwrite: true
+      DataType: "aws:ec2:image"
 
+  # --- 旧EC2をTGから外して状態遷移 ---
+  - name: targetGroupBranch1
+    action: aws:branch
+    nextStep: getTargetGroupArn
+    isEnd: false
+    inputs:
+      Choices: []   # 必要ならここでTG名のcontains分岐を入れる
+      Default: getTargetGroupArn
+
+  - name: getTargetGroupArn
+    action: aws:executeAwsApi
+    nextStep: deregisterTarget
+    isEnd: false
+    inputs:
+      Service: elbv2
+      Api: DescribeTargetGroups
+      Names: ["{{ getTargetGroupName.TargetGroupName }}"]
+    outputs:
+      - Name: TargetGroupArn
+        Selector: "$.TargetGroups[0].TargetGroupArn"
+        Type: String
+
+  - name: deregisterTarget
+    action: aws:executeAwsApi
+    nextStep: waitForDeregistration
+    isEnd: false
+    inputs:
+      Service: elbv2
+      Api: DeregisterTargets
+      TargetGroupArn: "{{ getTargetGroupArn.TargetGroupArn }}"
+      Targets:
+        - Id: "{{ UnhealtyInstanceId }}"
+
+  - name: waitForDeregistration
+    action: aws:executeScript
+    nextStep: getInstanceIp
+    isEnd: false
+    timeoutSeconds: 300
+    inputs:
+      Runtime: python3.11
+      Handler: wait_for_deregistration
+      Script: |
+        import time, boto3
+        def wait_for_deregistration(events, context):
+          tg = events["TargetGroupArn"]
+          iid = events["UnhealtyInstanceId"]
+          elb = boto3.client("elbv2")
+          while True:
+            desc = elb.describe_target_health(TargetGroupArn=tg)["TargetHealthDescriptions"]
+            ids = [t["Target"]["Id"] for t in desc]
+            if iid not in ids:
+              return {"msg": "Instance deregistered"}
+            time.sleep(5)
+    InputPayload:
+      TargetGroupArn: "{{ getTargetGroupArn.TargetGroupArn }}"
+      UnhealtyInstanceId: "{{ UnhealtyInstanceId }}"
+
+  - name: getInstanceIp
+    action: aws:executeAwsApi
+    nextStep: getInstanceState
+    isEnd: false
+    inputs:
+      Service: ec2
+      Api: DescribeInstances
+      InstanceIds: ["{{ UnhealtyInstanceId }}"]
+    outputs:
+      - Name: PrivateIpAddress
+        Selector: "$.Reservations[0].Instances[0].PrivateIpAddress"
+        Type: String
+
+  - name: getInstanceState
+    action: aws:executeAwsApi
+    nextStep: instanceStateBranch
+    isEnd: false
+    inputs:
+      Service: ec2
+      Api: DescribeInstances
+      InstanceIds: ["{{ UnhealtyInstanceId }}"]
+    outputs:
+      - Name: State
+        Selector: "$.Reservations[0].Instances[0].State.Name"
+        Type: String
+
+  - name: instanceStateBranch
+    action: aws:branch
+    nextStep: runInstances
+    isEnd: false
+    inputs:
+      Choices:
+        - NextStep: stopInstance
+          Variable: "{{ getInstanceState.State }}"
+          StringEquals: "running"
+      Default: runInstances
+
+  - name: stopInstance
+    action: aws:changeInstanceState
+    nextStep: waitForStop
+    isEnd: false
+    inputs:
+      InstanceIds: ["{{ UnhealtyInstanceId }}"]
+      DesiredState: stopped
+
+  - name: waitForStop
+    action: aws:waitForAwsResourceProperty
+    nextStep: runInstances
+    isEnd: false
+    timeoutSeconds: 300
+    inputs:
+      Service: ec2
+      Api: DescribeInstances
+      InstanceIds: ["{{ UnhealtyInstanceId }}"]
+      PropertySelector: "$.Reservations[0].Instances[0].State.Name"
+      DesiredValues:
+        - "stopped"
+
+  # --- 別AZのLTで新EC2を起動 → TG登録＆ヘルス待ち ---
+  - name: runInstances
+    action: aws:executeAwsApi
+    nextStep: sleep
+    isEnd: false
+    inputs:
+      Service: ec2
+      Api: RunInstances
+      LaunchTemplateId: "{{ getOtherAZLaunchTemplateId.LaunchTemplateId }}"
+      MaxCount: 1
+      MinCount: 1
+    outputs:
+      - Name: InstanceId
+        Selector: "$.Instances[0].InstanceId"
+        Type: String
+      - Name: ImageId
+        Selector: "$.Instances[0].ImageId"
+        Type: String
+      - Name: InstanceType
+        Selector: "$.Instances[0].InstanceType"
+        Type: String
+
+  - name: sleep
+    action: aws:sleep
+    nextStep: waitForInstanceRunning
+    isEnd: false
+    inputs:
+      Duration: PT1S
+
+  - name: waitForInstanceRunning
+    action: aws:waitForAwsResourceProperty
+    nextStep: targetGroupBranch2
+    isEnd: false
+    timeoutSeconds: 300
+    inputs:
+      Service: ec2
+      Api: DescribeInstances
+      InstanceIds: ["{{ runInstances.InstanceId }}"]
+      PropertySelector: "$.Reservations[0].Instances[0].State.Name"
+      DesiredValues:
+        - "running"
+
+  - name: targetGroupBranch2
+    action: aws:branch
+    nextStep: registerTarget
+    isEnd: false
+    inputs:
+      Choices: []
+      Default: registerTarget
+
+  - name: registerTarget
+    action: aws:executeAwsApi
+    nextStep: waitForRegistration
+    isEnd: false
+    inputs:
+      Service: elbv2
+      Api: RegisterTargets
+      TargetGroupArn: "{{ getTargetGroupArn.TargetGroupArn }}"
+      Targets:
+        - Id: "{{ runInstances.InstanceId }}"
+
+  - name: waitForRegistration
+    action: aws:executeScript
+    nextStep: getNewInstanceIp
+    isEnd: false
+    timeoutSeconds: 300
+    inputs:
+      Runtime: python3.11
+      Handler: wait_for_registration
+      Script: |
+        import time, boto3
+        def wait_for_registration(events, context):
+          tg = events["TargetGroupArn"]
+          iid = events["InstanceId"]
+          elb = boto3.client("elbv2")
+          while True:
+            for d in elb.describe_target_health(TargetGroupArn=tg)["TargetHealthDescriptions"]:
+              if d["Target"]["Id"] == iid and d["TargetHealth"]["State"] == "healthy":
+                return {"msg": "Instance registered healthy"}
+            time.sleep(15)
+    InputPayload:
+      InstanceId: "{{ runInstances.InstanceId }}"
+      TargetGroupArn: "{{ getTargetGroupArn.TargetGroupArn }}"
+
+  - name: getNewInstanceIp
+    action: aws:executeAwsApi
+    nextStep: getChildAlarms
+    isEnd: false
+    inputs:
+      Service: ec2
+      Api: DescribeInstances
+      InstanceIds: ["{{ runInstances.InstanceId }}"]
+    outputs:
+      - Name: PrivateIpAddress
+        Selector: "$.Reservations[0].Instances[0].PrivateIpAddress"
+        Type: String
+
+  # --- 複合アラーム → 子アラーム名一覧を取得 ---
+  - name: getChildAlarms
+    action: aws:executeAwsApi
+    nextStep: loopUpdateChildAlarms
+    isEnd: false
+    inputs:
+      Service: cloudwatch
+      Api: DescribeAlarms
+      ChildrenOfAlarmName: "{{ AlarmName }}"
+    outputs:
+      - Name: ChildAlarmNames
+        Selector: "$.MetricAlarms[*].AlarmName"
+        Type: StringList
+
+  # --- 子アラームを Items方式で全件更新（LoopCondition不要）---
+  - name: loopUpdateChildAlarms
+    action: aws:loop
+    nextStep: modifyRecordSets
+    isEnd: false
+    inputs:
+      Items: "{{ getChildAlarms.ChildAlarmNames }}"
+      MaxIterations: 50
+      Steps:
+
+        - name: getChildAlarmParams
+          action: aws:executeAwsApi
+          isEnd: false
+          inputs:
+            Service: cloudwatch
+            Api: DescribeAlarms
+            AlarmNames: "{{ item }}"
+          outputs:
+            - Name: Namespace
+              Selector: "$.MetricAlarms[0].Namespace"
+              Type: String
+            - Name: MetricName
+              Selector: "$.MetricAlarms[0].MetricName"
+              Type: String
+            - Name: Dimensions
+              Selector: "$.MetricAlarms[0].Dimensions"
+              Type: MapList
+            - Name: Statistic
+              Selector: "$.MetricAlarms[0].Statistic"
+              Type: String
+            - Name: ExtendedStatistic
+              Selector: "$.MetricAlarms[0].ExtendedStatistic"
+              Type: String
+            - Name: Period
+              Selector: "$.MetricAlarms[0].Period"
+              Type: Integer
+            - Name: EvaluationPeriods
+              Selector: "$.MetricAlarms[0].EvaluationPeriods"
+              Type: Integer
+            - Name: DatapointsToAlarm
+              Selector: "$.MetricAlarms[0].DatapointsToAlarm"
+              Type: Integer
+            - Name: Threshold
+              Selector: "$.MetricAlarms[0].Threshold"
+              Type: String
+            - Name: ComparisonOperator
+              Selector: "$.MetricAlarms[0].ComparisonOperator"
+              Type: String
+            - Name: TreatMissingData
+              Selector: "$.MetricAlarms[0].TreatMissingData"
+              Type: String
+            - Name: EvaluateLowSampleCountPercentile
+              Selector: "$.MetricAlarms[0].EvaluateLowSampleCountPercentile"
+              Type: String
+            - Name: Unit
+              Selector: "$.MetricAlarms[0].Unit"
+              Type: String
+            - Name: AlarmDescription
+              Selector: "$.MetricAlarms[0].AlarmDescription"
+              Type: String
+            - Name: ActionsEnabled
+              Selector: "$.MetricAlarms[0].ActionsEnabled"
+              Type: Boolean
+            - Name: OKActions
+              Selector: "$.MetricAlarms[0].OKActions"
+              Type: StringList
+            - Name: AlarmActions
+              Selector: "$.MetricAlarms[0].AlarmActions"
+              Type: StringList
+            - Name: InsufficientDataActions
+              Selector: "$.MetricAlarms[0].InsufficientDataActions"
+              Type: StringList
+            - Name: Metrics
+              Selector: "$.MetricAlarms[0].Metrics"
+              Type: MapList
+
+        - name: modifyMatch
+          action: aws:executeScript
+          nextStep: maybePutChildAlarm
+          isEnd: false
+          inputs:
+            Runtime: python3.11
+            Handler: handler
+            Script: |
+              def handler(event, context):
+                  dims = event.get("Dimensions") or []
+                  oldid = event["OldInstanceId"]
+                  newid = event["NewInstanceId"]
+                  modified = False
+                  for d in dims:
+                      if d.get("Name") == "InstanceId" and d.get("Value") == oldid:
+                          d["Value"] = newid
+                          modified = True
+                  return {"Modified": modified, "Dimensions": dims}
+          InputPayload:
+            Dimensions: "{{ getChildAlarmParams.Dimensions }}"
+            OldInstanceId: "{{ UnhealtyInstanceId }}"
+            NewInstanceId: "{{ runInstances.InstanceId }}"
+          outputs:
+            - Name: Modified
+              Selector: "$.Modified"
+              Type: Boolean
+            - Name: Dimensions
+              Selector: "$.Dimensions"
+              Type: MapList
+
+        - name: maybePutChildAlarm
+          action: aws:branch
+          isEnd: false
+          inputs:
+            Choices:
+              - NextStep: putChildAlarm
+                Variable: "{{ modifyMatch.Modified }}"
+                BooleanEquals: true
+            Default: skipPutChildAlarm
+
+        - name: putChildAlarm
+          action: aws:executeScript
+          isEnd: false
+          inputs:
+            Runtime: python3.11
+            Handler: handler
+            Script: |
+              import boto3
+              def _int(v):
+                try: return int(v)
+                except: return v
+              def _float(v):
+                try: return float(v)
+                except: return v
+              def handler(event, context):
+                cw = boto3.client("cloudwatch")
+                # 数値項目は型を合わせる
+                period = _int(event.get("Period"))
+                evalp  = _int(event.get("EvaluationPeriods"))
+                dpa    = _int(event.get("DatapointsToAlarm")) if event.get("DatapointsToAlarm") is not None else None
+                thr    = _float(event.get("Threshold"))
+                req = {
+                  "AlarmName": event["AlarmName"],
+                  "AlarmDescription": event.get("AlarmDescription"),
+                  "ActionsEnabled": event.get("ActionsEnabled", True),
+                  "OKActions": event.get("OKActions") or [],
+                  "AlarmActions": event.get("AlarmActions") or [],
+                  "InsufficientDataActions": event.get("InsufficientDataActions") or [],
+                  "Namespace": event.get("Namespace"),
+                  "MetricName": event.get("MetricName"),
+                  "Dimensions": event.get("Dimensions") or [],
+                  "Period": period,
+                  "EvaluationPeriods": evalp,
+                  "DatapointsToAlarm": dpa,
+                  "Threshold": thr,
+                  "ComparisonOperator": event.get("ComparisonOperator"),
+                  "TreatMissingData": event.get("TreatMissingData"),
+                  "EvaluateLowSampleCountPercentile": event.get("EvaluateLowSampleCountPercentile"),
+                  "Unit": event.get("Unit")
+                }
+                # Statistic / ExtendedStatistic はどちらか一方
+                if event.get("ExtendedStatistic"):
+                  req["ExtendedStatistic"] = event["ExtendedStatistic"]
+                elif event.get("Statistic"):
+                  req["Statistic"] = event["Statistic"]
+                # None除去
+                req = {k:v for k,v in req.items() if v is not None}
+                cw.put_metric_alarm(**req)
+                return {"ok": True}
+          InputPayload:
+            AlarmName: "{{ item }}"
+            AlarmDescription: "{{ getChildAlarmParams.AlarmDescription }}"
+            ActionsEnabled: "{{ getChildAlarmParams.ActionsEnabled }}"
+            OKActions: "{{ getChildAlarmParams.OKActions }}"
+            AlarmActions: "{{ getChildAlarmParams.AlarmActions }}"
+            InsufficientDataActions: "{{ getChildAlarmParams.InsufficientDataActions }}"
+            Namespace: "{{ getChildAlarmParams.Namespace }}"
+            MetricName: "{{ getChildAlarmParams.MetricName }}"
+            Dimensions: "{{ modifyMatch.Dimensions }}"
+            Period: "{{ getChildAlarmParams.Period }}"
+            EvaluationPeriods: "{{ getChildAlarmParams.EvaluationPeriods }}"
+            DatapointsToAlarm: "{{ getChildAlarmParams.DatapointsToAlarm }}"
+            Threshold: "{{ getChildAlarmParams.Threshold }}"
+            ComparisonOperator: "{{ getChildAlarmParams.ComparisonOperator }}"
+            TreatMissingData: "{{ getChildAlarmParams.TreatMissingData }}"
+            EvaluateLowSampleCountPercentile: "{{ getChildAlarmParams.EvaluateLowSampleCountPercentile }}"
+            Unit: "{{ getChildAlarmParams.Unit }}"
+            Statistic: "{{ getChildAlarmParams.Statistic }}"
+            ExtendedStatistic: "{{ getChildAlarmParams.ExtendedStatistic }}"
+
+        - name: skipPutChildAlarm
+          action: aws:executeScript
+          isEnd: false
+          inputs:
+            Runtime: python3.11
+            Handler: handler
+            Script: |
+              def handler(event, context):
+                return {"skipped": True}
+
+  # --- Route53 Aレコード：旧IP→新IPに差し替え（HostedZoneID が空ならスキップでもOK） ---
+  - name: modifyRecordSets
+    action: aws:executeScript
+    nextStep: Branch
+    isEnd: false
+    inputs:
+      Runtime: python3.11
+      Handler: modify_record_sets
+      Script: |
+        import boto3
+        def modify_record_sets(event, context):
+          hosted_zone_id = event["HostedZoneID"]
+          if not hosted_zone_id:
+            return {"HostedZoneId": "", "Changes": [], "hasChanges": False}
+          old_ip = event["oldIp"]; new_ip = event["newIp"]
+          client = boto3.client("route53")
+          pager = client.get_paginator("list_resource_record_sets")
+          changes = []
+          for page in pager.paginate(HostedZoneId=hosted_zone_id):
+            for rs in page["ResourceRecordSets"]:
+              if rs["Type"] == "A" and "ResourceRecords" in rs:
+                for rr in rs["ResourceRecords"]:
+                  if rr["Value"] == old_ip:
+                    changes.append({
+                      "Action": "UPSERT",
+                      "ResourceRecordSet": {
+                        "Name": rs["Name"],
+                        "Type": "A",
+                        "TTL": rs.get("TTL", 300),
+                        "ResourceRecords": [{"Value": new_ip}]
+                      }
+                    })
+                    break
+          return {"HostedZoneId": hosted_zone_id, "Changes": changes, "hasChanges": bool(changes)}
+    InputPayload:
+      HostedZoneID: "{{ HostedZoneID }}"
+      oldIp: "{{ getInstanceIp.PrivateIpAddress }}"
+      newIp: "{{ getNewInstanceIp.PrivateIpAddress }}"
+    outputs:
+      - Name: HostedZoneId
+        Selector: "$.HostedZoneId"
+        Type: String
+      - Name: Changes
+        Selector: "$.Changes"
+        Type: MapList
+      - Name: HasChanges
+        Selector: "$.hasChanges"
+        Type: Boolean
+
+  - name: Branch
+    action: aws:branch
+    nextStep: startBackup
+    isEnd: false
+    inputs:
+      Choices:
+        - NextStep: UpdateRecordSets
+          Variable: "{{ modifyRecordSets.HasChanges }}"
+          BooleanEquals: true
+      Default: startBackup
+
+  - name: UpdateRecordSets
+    action: aws:executeAwsApi
+    nextStep: startBackup
+    isEnd: false
+    inputs:
+      Service: route53
+      Api: ChangeResourceRecordSets
+      HostedZoneId: "{{ HostedZoneID }}"
+      ChangeBatch: "{{ modifyRecordSets.Changes }}"
+
+  # --- 新EC2のバックアップを起動 → 完了/失敗待ち ---
+  - name: startBackup
+    action: aws:executeAwsApi
+    nextStep: waitForBackupCompletion
+    isEnd: false
+    inputs:
+      Service: backup
+      Api: StartBackupJob
+      BackupVaultName: "{{ getBackupVaultName.BackupVaultName }}"
+      ResourceArn: "arn:aws:ec2:{{ global:REGION }}:{{ global:ACCOUNT_ID }}:instance/{{ runInstances.InstanceId }}"
+      IamRoleArn: "{{ BackupRoleArn }}"
+    outputs:
+      - Name: BackupJobId
+        Selector: "$.BackupJobId"
+        Type: String
+
+  - name: waitForBackupCompletion
+    action: aws:waitForAwsResourceProperty
+    isEnd: true
+    timeoutSeconds: 300
+    inputs:
+      Service: backup
+      Api: DescribeBackupJob
+      BackupJobId: "{{ startBackup.BackupJobId }}"
+      PropertySelector: "$.State"
+      DesiredValues:
+        - "COMPLETED"
+        - "FAILED"
