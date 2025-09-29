@@ -1,0 +1,22 @@
+$Prefix  = "stg-sgn-pf-alarm-ec2-eucap-"
+$Region  = "ap-northeast-1"
+$Key     = "<YOUR_KEY>"
+$Val     = "<YOUR_VALUE>"
+
+# Metric アラーム
+$metric = aws cloudwatch describe-alarms --region $Region --alarm-name-prefix $Prefix --query "MetricAlarms[].AlarmArn" --output json | ConvertFrom-Json
+foreach ($arn in $metric) {
+  if ($arn) {
+    Write-Host "Tagging: $arn"
+    aws cloudwatch tag-resource --region $Region --resource-arn $arn --tags Key=$Key,Value=$Val | Out-Null
+  }
+}
+
+# Composite アラーム（必要なら）
+$composite = aws cloudwatch describe-alarms --region $Region --alarm-name-prefix $Prefix --query "CompositeAlarms[].AlarmArn" --output json | ConvertFrom-Json
+foreach ($arn in $composite) {
+  if ($arn) {
+    Write-Host "Tagging (composite): $arn"
+    aws cloudwatch tag-resource --region $Region --resource-arn $arn --tags Key=$Key,Value=$Val | Out-Null
+  }
+}
