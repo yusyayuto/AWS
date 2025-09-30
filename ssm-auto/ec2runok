@@ -1,0 +1,11 @@
+- name: waitForStatusChecks
+  action: aws:waitForAwsResourceProperty
+  timeoutSeconds: 600   # 10分
+  inputs:
+    Service: ec2
+    Api: DescribeInstanceStatus
+    InstanceIds:
+      - '{{ runInstances.InstanceId }}'
+    PropertySelector: $.InstanceStatuses[0].InstanceStatus.Status
+    DesiredValues:
+      - ok
