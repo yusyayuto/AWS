@@ -1,0 +1,11 @@
+- name: startCustomService
+  action: aws:runCommand
+  inputs:
+    DocumentName: AWS-RunPowerShellScript
+    Targets:
+      - Key: InstanceIds
+        Values:
+          - '{{ runInstances.InstanceId }}'
+    Parameters:
+      commands:
+        - cmd.exe /c "D:\UNYO\service\service.bat 3"
