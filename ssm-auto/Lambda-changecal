@@ -1,0 +1,74 @@
+import os, json, boto3
+
+ssm = boto3.client("ssm")
+sns = boto3.client("sns")
+CAL_ARN = os.environ["CHANGE_CAL_ARN"]
+AUTOMATION_DOC = os.environ["AUTOMATION_DOC"]          
+PARAM_KEY_INSTANCE_ID = os.environ["PARAM_KEY_INSTANCE_ID"]  
+PARAM_KEY_COMPOSITE   = os.environ.get("PARAM_KEY_COMPOSITE")
+
+SNS_ARN = os.environ.get("NOTIFY_TOPIC_ARN")  # 任意
+
+def is_calendar_open():
+    """Change Calendar の現在状態を返す (is_open, state, next_transition_iso)"""
+    resp = ssm.get_calendar_state(CalendarNames=[CAL_ARN])
+    return (resp["State"] == "OPEN", resp["State"], resp.get("NextTransitionTime"))
+
+def notify_if_configured(subject, message):
+    if SNS_ARN:
+        sns.publish(TopicArn=SNS_ARN, Subject=subject, Message=message)
+
+def lambda_handler(event, _):
+    # 1) まずChange Calendarで抑止判定
+    try:
+        ok, state, next_t = is_calendar_open()
+    except Exception as e:
+        # フェイルセーフ方針：取得失敗時は実行しない（必要なら反対の方針に）
+        notify_if_configured(
+            subject="[Failover] Calendar check error - suppressed",
+            message=f"Error: {e}\nEvent: {json.dumps(event)}"
+        )
+        return {"status":"suppressed_error_calendar","error":str(e)}
+
+    if not ok:
+        # 抑止（夜間・休日・凍結期間）
+        notify_if_configured(
+            subject="[Failover] Suppressed by Change Calendar (CLOSED)",
+            message=f"Calendar={CAL_ARN}\nState={state}\nNext={next_t}\nEvent={json.dumps(event)}"
+        )
+        return {"status":"suppressed_by_change_calendar","calendar_state":state,"next_transition":next_t}
+
+    # 2) 許可時間帯だけ処理を実行
+    # 複合アラーム → 子アラーム → InstanceId 抽出 → Automation 実行
+    cw = boto3.client("cloudwatch")
+
+    cur = event["detail"]["state"]["value"]
+    prev = event["detail"].get("previousState", {}).get("value")
+    if not (cur == "ALARM" and prev != "ALARM"):
+        return {"status":"ignored","reason":"not a transition into ALARM","current":cur,"previous":prev}
+
+    comp = event["detail"]["alarmName"]
+    reason = json.loads(event["detail"]["state"]["reasonData"])
+    child_arn = reason["triggeringAlarms"][0]["arn"]
+    child = child_arn.split(":alarm:", 1)[1]
+
+    r = cw.describe_alarms(AlarmNames=[child])
+    dims = r["MetricAlarms"][0].get("Dimensions", [])
+    iid  = next((d["Value"] for d in dims if d.get("Name")=="InstanceId"), None)
+    if not iid:
+        raise RuntimeError(f"No InstanceId in alarm: {child}")
+
+    # SSM Automation 起動
+    ssmc = boto3.client("ssm")
+    params = {PARAM_KEY_INSTANCE_ID: [iid]}
+    if PARAM_KEY_COMPOSITE:
+        params[PARAM_KEY_COMPOSITE] = [comp]
+
+    resp = ssmc.start_automation_execution(
+        DocumentName=AUTOMATION_DOC,
+        Parameters=params,
+        ClientToken=event.get("id")
+    )
+
+    return {"status":"started","instanceId":iid,"childAlarm":child,"composite":comp,
+            "executionId":resp.get("AutomationExecutionId")}
