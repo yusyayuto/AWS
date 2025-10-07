@@ -1,0 +1,16 @@
+パス
+{
+  "iid": "$.detail.instance-id",
+  "state": "$.detail.state",
+  "time": "$.time",
+  "region": "$.region"
+}
+
+テンプレート
+{
+  "trigger": "ec2-stop",
+  "instanceId": <iid>,
+  "state": <state>,
+  "region": <region>,
+  "eventTime": <time>
+}
