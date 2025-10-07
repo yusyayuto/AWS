@@ -3,9 +3,9 @@ import boto3, os
 ssm = boto3.client("ssm")
 ec2 = boto3.client("ec2")
 
-DOC   = os.environ["AUTOMATION_DOC"]          # SSMドキュメント名
-P_IID = os.environ["PARAM_KEY_INSTANCE_ID"]   # 例: UnhealthyInstanceId
-P_ALM = os.environ["PARAM_KEY_ALARM_NAME"]    # 例: AlarmName
+DOC   = os.environ["AUTOMATION_DOC"]
+P_IID = os.environ["PARAM_KEY_INSTANCE_ID"]
+P_ALM = os.environ["PARAM_KEY_ALARM_NAME"]
 TAG_KEY = "RelatedAlarmName"
 
 def lambda_handler(event, _):
@@ -13,7 +13,6 @@ def lambda_handler(event, _):
     if not iid:
         return {"status": "error", "reason": "no instance id"}
 
-    # タグから複合アラーム名取得
     r = ec2.describe_tags(
         Filters=[
             {"Name": "resource-id", "Values": [iid]},
@@ -25,7 +24,6 @@ def lambda_handler(event, _):
 
     alarm_name = r["Tags"][0]["Value"]
 
-    # SSMオートメーション起動
     resp = ssm.start_automation_execution(
         DocumentName=DOC,
         Parameters={P_IID: [iid], P_ALM: [alarm_name]},
