@@ -1,0 +1,107 @@
+# alarm_handler.py
+import os
+import json
+import boto3
+
+cw  = boto3.client("cloudwatch")
+ssm = boto3.client("ssm")
+
+# === 環境変数（あなたの環境に合わせて設定） ===
+AUTOMATION_DOC = os.environ["AUTOMATION_DOC"]                 # 例: My-EC2-Recover
+PARAM_IID      = os.environ.get("PARAM_KEY_INSTANCE_ID", "UnhealthyInstanceId")
+PARAM_RELALM   = os.environ.get("PARAM_KEY_RELATED_ALARM", "RelatedAlarm")
+CHANGE_CAL_ARN = os.environ.get("CHANGE_CAL_ARN")             # 例: arn:aws:ssm:ap-northeast-1:123...:document/BusinessHours
+
+def is_calendar_open() -> bool:
+    """
+    SSM Change Calendarの現在状態を確認する。
+    - CHANGE_CAL_ARN 未設定なら True（常に許可）
+    - OPEN の時だけ True を返す
+    """
+    if not CHANGE_CAL_ARN:
+        return True
+    r = ssm.get_calendar_state(CalendarNames=[CHANGE_CAL_ARN])
+    return r["State"] == "OPEN"
+
+def get_child_alarm_and_instance_id_from_composite(event) -> tuple[str, str]:
+    """
+    EventBridge の CloudWatch アラームイベント（複合）から
+    1) 子アラーム名
+    2) 子アラームの Dimensions から InstanceId
+    を取得して返す。
+    """
+    # 複合アラーム名
+    comp = event["detail"]["alarmName"]
+
+    # reasonData は JSON 文字列
+    reason = json.loads(event["detail"]["state"]["reasonData"])
+
+    # 子アラーム 1件（先頭）を採用
+    if not reason.get("triggeringAlarms"):
+        raise RuntimeError("No triggeringAlarms in reasonData")
+    child_arn = reason["triggeringAlarms"][0]["arn"]
+    # ARN からアラーム名に変換
+    # arn:aws:cloudwatch:region:account:alarm:AlarmName
+    child_name = child_arn.split(":alarm:", 1)[1]
+
+    # 子アラームのメトリクスから InstanceId を取り出す
+    r = cw.describe_alarms(AlarmNames=[child_name])
+    if not r.get("MetricAlarms"):
+        raise RuntimeError(f"No MetricAlarms found for child alarm: {child_name}")
+    dims = r["MetricAlarms"][0].get("Dimensions", [])
+    iid  = next((d["Value"] for d in dims if d.get("Name") == "InstanceId"), None)
+    if not iid:
+        raise RuntimeError(f"No InstanceId dimension in child alarm: {child_name}")
+
+    return child_name, iid
+
+def lambda_handler_alarm(event, _context):
+    """
+    CloudWatch 複合アラーム → EventBridge → 本Lambda
+    役割：
+      - Change Calendar が OPEN のときだけ SSM Automation を起動
+      - 複合アラーム名（=RelatedAlarm値として扱う）と
+        子アラームから抽出した InstanceId を渡す
+    """
+    # 1) 本当に ALARM 遷移したかガード（ALARM→ALARM更新は無視）
+    cur  = event["detail"]["state"]["value"]                           # "ALARM" 等
+    prev = event["detail"].get("previousState", {}).get("value")       # "OK" or "ALARM" 等
+    if not (cur == "ALARM" and prev != "ALARM"):
+        return {
+            "status": "ignored",
+            "reason": "not a transition into ALARM",
+            "current": cur,
+            "previous": prev
+        }
+
+    # 2) Change Calendar チェック（CLOSEDなら抑止して終了）
+    if not is_calendar_open():
+        return {
+            "status": "suppressed_by_change_calendar",
+            "composite": event["detail"]["alarmName"]
+        }
+
+    # 3) 子アラーム名と InstanceId を取得
+    child_name, iid = get_child_alarm_and_instance_id_from_composite(event)
+
+    # 4) RelatedAlarm は「複合アラーム名」をそのまま値として渡す
+    comp = event["detail"]["alarmName"]  # ＝タグの値と同一にしておく想定
+
+    # 5) SSM Automation 起動（冪等性: ClientToken に EventBridge の id を使用）
+    params = {
+        PARAM_IID:    [iid],
+        PARAM_RELALM: [comp]
+    }
+    resp = ssm.start_automation_execution(
+        DocumentName=AUTOMATION_DOC,
+        Parameters=params,
+        ClientToken=event.get("id")
+    )
+
+    return {
+        "status": "started",
+        "instanceId": iid,
+        "childAlarm": child_name,
+        "composite": comp,
+        "executionId": resp.get("AutomationExecutionId")
+    }
