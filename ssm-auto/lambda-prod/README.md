@@ -86,3 +86,10 @@
 	•	CALENDAR_ARN が CLOSED の場合、Lambdaは SSMオートメーションを起動しない。
 	•	すべてのLambdaは同一SSMドキュメントを呼び出す。環境ごとにAUTOMATION_DOCを切り替える。
 
+## #  Lambda ファイル名 & Handler 一覧
+
+| 役割 | ファイル名 | Handler |
+|------|-------------|----------|
+|  複合アラーム発火用（CloudWatch → Lambda → SSM） | `alarm_handler.py` | `alarm_handler.lambda_handler_alarm` |
+|  EC2停止検知用（EventBridge → Lambda → SSM） | `stop_handler.py` | `stop_handler.lambda_handler_stop` |
+|  子アラーム更新用（SSM Automation内で呼び出し） | `update_alarms.py` | `update_alarms.lambda_handler_update_alarms` |
