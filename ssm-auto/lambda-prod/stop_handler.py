@@ -1,61 +1,65 @@
 # stop_handler.py
-import os
-import boto3
+import json, boto3, os
 
-ec2 = boto3.client("ec2")
 ssm = boto3.client("ssm")
+ec2 = boto3.client("ec2")
 
-# === 環境変数（差し替え） ===
-AUTOMATION_DOC    = os.environ["AUTOMATION_DOC"]
-PARAM_IID         = os.environ.get("PARAM_KEY_INSTANCE_ID", "InstanceId")
-PARAM_RELALM_NAME = os.environ.get("PARAM_KEY_RELATED_ALARM_NAME", "RelatedAlarmName")
-# EC2 側のタグキー（値が複合アラーム名）
-INSTANCE_TAG_KEY  = os.environ.get("INSTANCE_TAG_KEY_RELATED_ALARM_NAME", "RelatedAlarmName")
-CHANGE_CAL_ARN    = os.environ.get("CHANGE_CAL_ARN")
+DOC  = os.environ["AUTOMATION_DOC"]            # SSM Automation ドキュメント名
+P_IID = os.environ["PARAM_KEY_INSTANCE_ID"]    # 例: UnhealthyInstanceId
+P_ALM = os.environ["PARAM_KEY_ALARM_NAME"]     # 例: AlarmName
+TAG_KEY = os.environ.get("TAG_KEY", "RelatedAlarmName")  # デフォルトキー
 
-def is_calendar_open() -> bool:
-    if not CHANGE_CAL_ARN:
-        return True
-    r = ssm.get_calendar_state(CalendarNames=[CHANGE_CAL_ARN])
-    return r["State"] == "OPEN"
+def lambda_handler_stop(event, context):
+    print("### Raw Event ###")
+    print(json.dumps(event, ensure_ascii=False))
 
-def get_related_alarm_name_from_instance(instance_id: str) -> str | None:
-    """EC2 のタグから RelatedAlarmName の値を取得"""
-    res = ec2.describe_tags(
-        Filters=[
-            {"Name": "resource-id", "Values": [instance_id]},
-            {"Name": "key",         "Values": [INSTANCE_TAG_KEY]}
-        ]
-    )
-    return res["Tags"][0]["Value"] if res.get("Tags") else None
-
-def lambda_handler_stop(event, _context):
-    # InputTransformer で {"instanceId": "<id>"} を渡すのが楽
-    iid = (event.get("instanceId")
-           or event.get("detail", {}).get("instance-id"))
+    # --- EC2 停止イベントから instance-id を取得 ---
+    iid = event.get("detail", {}).get("instance-id")
     if not iid:
-        raise ValueError("instanceId not found in event")
+        print("Error: instance-id not found in event")
+        return {"status": "error", "reason": "missing instance-id"}
 
-    # カレンダー CLOSED なら抑止
-    if not is_calendar_open():
-        return {"status": "suppressed_by_change_calendar", "instanceId": iid}
+    # --- EC2インスタンスのタグを取得 ---
+    try:
+        res = ec2.describe_tags(
+            Filters=[
+                {"Name": "resource-id", "Values": [iid]},
+                {"Name": "key", "Values": [TAG_KEY]},
+            ]
+        )
+        tags = res.get("Tags", [])
+        if not tags:
+            print(f"No tag '{TAG_KEY}' found for instance {iid}")
+            return {"status": "skipped", "reason": f"tag '{TAG_KEY}' not found"}
 
-    related_alarm_name = get_related_alarm_name_from_instance(iid)
-    if not related_alarm_name:
-        return {"status": "skipped_no_related_alarm_name_tag", "instanceId": iid}
+        alarm_name = tags[0]["Value"]
+        print(f"Found alarm tag: {TAG_KEY} = {alarm_name}")
 
-    params = {
-        PARAM_IID:         [iid],
-        PARAM_RELALM_NAME: [related_alarm_name],
-    }
-    resp = ssm.start_automation_execution(
-        DocumentName=AUTOMATION_DOC,
-        Parameters=params,
-        ClientToken=event.get("id") or iid
-    )
-    return {
-        "status": "started",
-        "instanceId": iid,
-        "relatedAlarmName": related_alarm_name,
-        "executionId": resp["AutomationExecutionId"]
-    }
+    except Exception as e:
+        print(f"Tag retrieval error: {e}")
+        return {"status": "error", "reason": str(e)}
+
+    # --- SSM Automation 実行 ---
+    try:
+        resp = ssm.start_automation_execution(
+            DocumentName=DOC,
+            Parameters={
+                P_IID: [iid],
+                P_ALM: [alarm_name]
+            },
+            ClientToken=event.get("id", iid)
+        )
+
+        execution_id = resp.get("AutomationExecutionId")
+        print(f"Started AutomationExecution: {execution_id}")
+
+        return {
+            "status": "started",
+            "instanceId": iid,
+            "alarmName": alarm_name,
+            "executionId": execution_id
+        }
+
+    except Exception as e:
+        print(f"SSM execution error: {e}")
+        return {"status": "error", "reason": str(e)}
