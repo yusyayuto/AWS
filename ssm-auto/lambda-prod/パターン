@@ -3,6 +3,15 @@
   "detail-type": ["AWS API Call via CloudTrail"],
   "detail": {
     "eventSource": ["ec2.amazonaws.com"],
-    "eventName": ["StopInstances", "RebootInstances", "TerminateInstances"]
+    "eventName": [
+      "StopInstances",
+      "RebootInstances",
+      "TerminateInstances"
+    ],
+    "userIdentity": {
+      "invokedBy": [
+        { "anything-but": "ssm.amazonaws.com" }
+      ]
+    }
   }
 }
