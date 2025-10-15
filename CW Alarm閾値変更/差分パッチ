@@ -1,0 +1,4 @@
+if ("memory" in m and "available" in m and "bytes" in m
+    and comp.endswith("LessThanOrEqualToThreshold")
+    and int(thr) in {1717986918, 3435973836}):
+    return {"ComparisonOperator": comp, "Threshold": 1_000_000_000_000}
