@@ -1,71 +1,187 @@
-# ==== 先頭の環境変数読み出し付近に追加 ====
-MEM_FALLBACK = os.environ.get("MEMORY_BASELINE_FALLBACK")  # "1.6G" or "3.2G" or None
+import os, json, urllib.parse, time
+import boto3
 
-# ==== ユーティリティとして追加 ====
-def _pick_mem_baseline_from_name(alarm_name: str):
-    n = alarm_name.lower()
-    pat_32 = ("3.2", "3200", "3g", "3gb", "3276", "3435")
-    pat_16 = ("1.6", "1600", "1g", "1gb", "1717")
-    if any(p in n for p in pat_32):
-        return 3435973836.0  # ≈3.2GB
-    if any(p in n for p in pat_16):
-        return 1717986918.0  # ≈1.6GB
-    if MEM_FALLBACK == "3.2G":
-        return 3435973836.0
-    if MEM_FALLBACK == "1.6G":
-        return 1717986918.0
-    return None  # 判定不能
+# === 環境変数 ===
+REGION = os.environ.get("AWS_REGION", "ap-northeast-1")
+FORCE_ONE = os.environ.get("FORCE_ONE_DATAPOINT", "false").lower() == "true"
+S3_BUCKET = os.environ.get("SNAPSHOT_S3_BUCKET")
 
-# ==== 既存の ROLLBACK_RULES から「Memory」の行は削除してください ====
-# （Disk/CPU/Status/Windows の行はそのまま）
+cw = boto3.client("cloudwatch", region_name=REGION)
+s3 = boto3.client("s3")
 
-# ==== do_rollback 内のループで、汎用ルール適用の前にメモリ専用処理を挿入 ====
-def do_rollback(name_prefix: str | None, dry_run: bool):
-    results = []
+# === 保存先キー ===
+def _s3_key(alarm_name: str) -> str:
+    enc = urllib.parse.quote(alarm_name, safe="")
+    return f"cw-alarm-backup/{REGION}/{enc}.json"
+
+def snapshot_merge_write(alarm_name: str, label: str, alarm_obj: dict):
+    key = _s3_key(alarm_name)
+    try:
+        cur = s3.get_object(Bucket=S3_BUCKET, Key=key)
+        data = json.loads(cur["Body"].read().decode("utf-8"))
+    except Exception:
+        data = {}
+    data[label] = alarm_obj
+    body = json.dumps(data, ensure_ascii=False).encode("utf-8")
+    s3.put_object(Bucket=S3_BUCKET, Key=key, Body=body, ContentType="application/json")
+
+# === 引数生成（説明を含む完全形） ===
+def build_put_args_from(a: dict) -> dict:
+    stat, estat = a.get("Statistic"), a.get("ExtendedStatistic")
+    if stat and estat:
+        estat = None
+    args = {
+        "AlarmName": a["AlarmName"],
+        "AlarmDescription": a.get("AlarmDescription"),
+        "ActionsEnabled": a.get("ActionsEnabled", True),
+        "OKActions": a.get("OKActions", []),
+        "AlarmActions": a.get("AlarmActions", []),
+        "InsufficientDataActions": a.get("InsufficientDataActions", []),
+        "MetricName": a["MetricName"],
+        "Namespace": a["Namespace"],
+        "Statistic": stat,
+        "ExtendedStatistic": estat,
+        "Dimensions": a.get("Dimensions", []),
+        "Period": a["Period"],
+        "Unit": a.get("Unit"),
+        "EvaluationPeriods": a.get("EvaluationPeriods"),
+        "DatapointsToAlarm": a.get("DatapointsToAlarm"),
+        "Threshold": a["Threshold"],
+        "ComparisonOperator": a["ComparisonOperator"],
+        "TreatMissingData": a.get("TreatMissingData", "missing"),
+    }
+    return {k: v for k, v in args.items() if v is not None and (not isinstance(v, str) or v.strip() != "")}
+
+# === ルール定義 ===
+UPDATE_RULES = [
+    {"match": ("LessThanOrEqualToThreshold", 10.0), "set": ("LessThanOrEqualToThreshold", 99.5),
+     "contains": ["logicaldisk", "% free space"]},
+    {"match": ("LessThanOrEqualToThreshold", 1717986918.0), "set": ("LessThanOrEqualToThreshold", 1_000_000_000_000.0),
+     "contains": ["memory", "available", "bytes"]},
+    {"match": ("GreaterThanThreshold", 90.0), "set": ("GreaterThanThreshold", 1.0),
+     "contains": ["processor", "% processor time"]},
+    {"match": ("GreaterThanOrEqualToThreshold", 1.0), "set": ("GreaterThanOrEqualToThreshold", 0.0),
+     "exact": "StatusCheckFailed_Instance"},
+    {"match": ("GreaterThanOrEqualToThreshold", 1.0), "set": ("GreaterThanOrEqualToThreshold", 0.0),
+     "exact": "StatusCheckFailed_System"},
+    {"match": ("LessThanThreshold", 1.0), "set": ("LessThanThreshold", 2.0),
+     "contains": ["windows", "service", "status"]},
+]
+
+INVERT_RULES = [
+    {"match": ("LessThanOrEqualToThreshold", 99.5), "set": ("LessThanOrEqualToThreshold", 10.0),
+     "contains": ["logicaldisk", "% free space"]},
+    {"match": ("LessThanOrEqualToThreshold", 1_000_000_000_000.0), "set": ("LessThanOrEqualToThreshold", 1717986918.0),
+     "contains": ["memory", "available", "bytes"]},
+    {"match": ("GreaterThanThreshold", 1.0), "set": ("GreaterThanThreshold", 90.0),
+     "contains": ["processor", "% processor time"]},
+    {"match": ("GreaterThanOrEqualToThreshold", 0.0), "set": ("GreaterThanOrEqualToThreshold", 1.0),
+     "exact": "StatusCheckFailed_Instance"},
+    {"match": ("GreaterThanOrEqualToThreshold", 0.0), "set": ("GreaterThanOrEqualToThreshold", 1.0),
+     "exact": "StatusCheckFailed_System"},
+    {"match": ("LessThanThreshold", 2.0), "set": ("LessThanThreshold", 1.0),
+     "contains": ["windows", "service", "status"]},
+]
+
+# === 共通関数 ===
+def describe_all_metric_alarms():
+    p = cw.get_paginator("describe_alarms")
+    for page in p.paginate():
+        for a in page.get("MetricAlarms", []):
+            if a.get("Metrics"):  # MetricMath/Composite除外
+                continue
+            yield a
+
+def describe_alarm_by_name(name: str):
+    r = cw.describe_alarms(AlarmNames=[name])
+    lst = r.get("MetricAlarms", [])
+    return lst[0] if lst else None
+
+def _matches(a, rule):
+    metric = a["MetricName"]
+    if "exact" in rule and metric != rule["exact"]:
+        return False
+    if "contains" in rule:
+        m = (metric or "").lower()
+        if not all(t in m for t in rule["contains"]):
+            return False
+    return True
+
+def _apply(a, rule):
+    op, thr = a["ComparisonOperator"], float(a["Threshold"])
+    mop, mthr = rule["match"]
+    if op != mop or thr != float(mthr):
+        return None
+    put = build_put_args_from(a)
+    sop, sthr = rule["set"]
+    put["ComparisonOperator"] = sop
+    put["Threshold"] = float(sthr)
+    if FORCE_ONE:
+        put["EvaluationPeriods"] = 1
+        put["DatapointsToAlarm"] = 1
+    return put
+
+# === アクション ===
+def do_update(prefix, dry_run):
+    res = []
     for a in describe_all_metric_alarms():
-        if name_prefix and not a["AlarmName"].startswith(name_prefix):
+        if prefix and not a["AlarmName"].startswith(prefix):
             continue
+        before = build_put_args_from(a)
+        snapshot_merge_write(a["AlarmName"], "before", before)
+        updated = None
+        for r in UPDATE_RULES:
+            if not _matches(a, r):
+                continue
+            u = _apply(a, r)
+            if u:
+                updated = u
+                break
+        if not updated:
+            res.append({"name": a["AlarmName"], "status": "skip"})
+            continue
+        if not dry_run:
+            cw.put_metric_alarm(**updated)
+        after_live = describe_alarm_by_name(a["AlarmName"]) if not dry_run else updated
+        snapshot_merge_write(a["AlarmName"], "after", build_put_args_from(after_live))
+        res.append({"name": a["AlarmName"], "from": before["Threshold"], "to": updated["Threshold"], "dry_run": dry_run})
+        time.sleep(0.05)
+    return {"result": "updated", "count": len(res), "items": res}
 
-        metric = a["MetricName"]
-        op = a["ComparisonOperator"]
-        thr = float(a["Threshold"])
-
-        # --- Memory Available Bytes の専用ロールバック ---
-        if (metric == "Memory Available Bytes"
-            and op == "LessThanOrEqualToThreshold"
-            and thr == 1_000_000_000_000.0):
-            base = _pick_mem_baseline_from_name(a["AlarmName"])
-            if base is None:
-                results.append({"name": a["AlarmName"], "status": "skip(mem-ambiguous)"})
-            else:
-                rb = build_put_args_from(a)
-                rb["Threshold"] = base
-                if not dry_run:
-                    cw.put_metric_alarm(**rb)
-                after_live = describe_alarm_by_name(a["AlarmName"]) if not dry_run else rb
-                if after_live:
-                    snapshot_merge_write(a["AlarmName"], "rollback", build_put_args_from(after_live))
-                results.append({"name": a["AlarmName"], "restored_to": base, "op": rb["ComparisonOperator"], "dry_run": dry_run})
-            time.sleep(0.05)
-            continue  # メモリはここで処理完了
-
-        # --- それ以外は既存の汎用 ROLLBACK_RULES を適用 ---
+def do_rollback(prefix, dry_run):
+    res = []
+    for a in describe_all_metric_alarms():
+        if prefix and not a["AlarmName"].startswith(prefix):
+            continue
         restored = None
-        for rule in ROLLBACK_RULES:
-            ok, rb = _apply_rule_if_match(a, rule)
-            if ok:
+        for r in INVERT_RULES:
+            if not _matches(a, r):
+                continue
+            rb = _apply(a, r)
+            if rb:
                 restored = rb
                 break
         if not restored:
-            results.append({"name": a["AlarmName"], "status": "skip(no-rollback-match)"})
+            res.append({"name": a["AlarmName"], "status": "skip"})
             continue
-
         if not dry_run:
             cw.put_metric_alarm(**restored)
         after_live = describe_alarm_by_name(a["AlarmName"]) if not dry_run else restored
-        if after_live:
-            snapshot_merge_write(a["AlarmName"], "rollback", build_put_args_from(after_live))
-        results.append({"name": a["AlarmName"], "restored_to": restored["Threshold"], "op": restored["ComparisonOperator"], "dry_run": dry_run})
+        snapshot_merge_write(a["AlarmName"], "rollback", build_put_args_from(after_live))
+        res.append({"name": a["AlarmName"], "restored_to": restored["Threshold"], "dry_run": dry_run})
         time.sleep(0.05)
+    return {"result": "rolled_back", "count": len(res), "items": res}
 
-    return {"result": "rolled_back", "count": len(results), "items": results}
+# === Lambda Handler ===
+def handler(event, context):
+    action = (event or {}).get("action", "update")
+    prefix = (event or {}).get("name_prefix")
+    dry_run = bool((event or {}).get("dry_run", False))
+    if not S3_BUCKET:
+        return {"error": "SNAPSHOT_S3_BUCKET is required"}
+    if action == "update":
+        return do_update(prefix, dry_run)
+    elif action == "rollback":
+        return do_rollback(prefix, dry_run)
+    else:
+        return {"error": "unknown action"}
