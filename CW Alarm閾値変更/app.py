@@ -8,9 +8,9 @@ FORCE_ONE = os.environ.get("FORCE_ONE_DATAPOINT", "false").lower() == "true"
 cw  = boto3.client("cloudwatch", region_name=REGION)
 ssm = boto3.client("ssm",        region_name=REGION)
 
-# ---- しきい値変換ロジック ----
+# ---------- しきい値変換ロジック ----------
 def decide_new_threshold(a):
-    # 単一メトリクス以外は対象外（Metrics フィールドを持つ＝メトリックマスは除外）
+    # 単一メトリクス以外は対象外（Metricsがある＝メトリックマス/複合想定）
     if "MetricName" not in a or a.get("Metrics"):
         return None
 
@@ -41,9 +41,8 @@ def decide_new_threshold(a):
 
     return None
 
-# ---- Parameter Store にアラーム単位で保存（サイズ対策のため分割） ----
+# ---------- Parameter Store（アラーム単位で保存） ----------
 def param_key_for_alarm(alarm_name):
-    # 〈パラメータストア名〉/encodedAlarmName
     encoded = urllib.parse.quote(alarm_name, safe='')
     return f"{PARAM_NAME}/{encoded}"
 
@@ -62,7 +61,7 @@ def load_snapshot(alarm_name):
     except ssm.exceptions.ParameterNotFound:
         return None
 
-# ---- put_metric_alarm 用の引数を現在定義から構築 ----
+# ---------- put_metric_alarm 用引数構築（全ディメンション含む） ----------
 def build_put_args_from(a):
     args = {
         "AlarmName": a["AlarmName"],
@@ -84,10 +83,17 @@ def build_put_args_from(a):
         "TreatMissingData": a.get("TreatMissingData", "missing"),
         "Tags": a.get("Tags", [])
     }
-    # None を除去（boto要件）
     return {k:v for k,v in args.items() if v is not None}
 
-def update_one(a):
+def describe_all_metric_alarms():
+    paginator = cw.get_paginator("describe_alarms")
+    for page in paginator.paginate():
+        for a in page.get("MetricAlarms", []):
+            if a.get("Metrics"):
+                continue
+            yield a
+
+def update_one(a, dry_run=False):
     rule = decide_new_threshold(a)
     if not rule:
         return None
@@ -96,62 +102,49 @@ def update_one(a):
     after  = dict(before)
     after["ComparisonOperator"] = rule["ComparisonOperator"]
     after["Threshold"] = rule["Threshold"]
-
     if FORCE_ONE:
         after["EvaluationPeriods"] = 1
         after["DatapointsToAlarm"] = 1
 
-    # put
-    cw.put_metric_alarm(**after)
+    if not dry_run:
+        cw.put_metric_alarm(**after)
+        save_snapshot(a["AlarmName"], {"before": before, "after": after, "rollback": before})
 
-    # 保存形式: before/after/rollback を保持（rollback=beforeと同）
-    save_snapshot(a["AlarmName"], {
-        "before": before,
-        "after": after,
-        "rollback": before
-    })
-    return {"name": a["AlarmName"], "change": {"from": before["Threshold"], "to": after["Threshold"]}}
+    return {"name": a["AlarmName"], "from": before["Threshold"], "to": after["Threshold"], "dry_run": dry_run}
 
-def rollback_one(name):
+def rollback_one(name, dry_run=False):
     snap = load_snapshot(name)
     if not snap:
-        return {"name": name, "status": "skip(no-snapshot)"}
+        return {"name": name, "status": "skip(no-snapshot)", "dry_run": dry_run}
     rb = snap["rollback"]
-    cw.put_metric_alarm(**rb)
-    return {"name": name, "status": "reverted"}
-
-def describe_all_metric_alarms():
-    paginator = cw.get_paginator("describe_alarms")
-    for page in paginator.paginate():
-        for a in page.get("MetricAlarms", []):
-            # 複合アラーム除外
-            if a.get("Metrics"): 
-                continue
-            yield a
+    if not dry_run:
+        cw.put_metric_alarm(**rb)
+    return {"name": name, "status": "reverted", "dry_run": dry_run}
 
 def handler(event, context):
     action = (event or {}).get("action", "update")
-    updated = []
-    reverted = []
+    name_prefix = (event or {}).get("name_prefix")
+    dry_run = bool((event or {}).get("dry_run", False))
 
+    def name_ok(n): return (not name_prefix) or n.startswith(name_prefix)
+
+    results = []
     if action == "update":
         for a in describe_all_metric_alarms():
-            r = update_one(a)
+            if not name_ok(a["AlarmName"]):
+                continue
+            r = update_one(a, dry_run=dry_run)
             if r:
-                updated.append(r)
-            time.sleep(0.1)  # 軽いスロットリング対策
-        return {"result": "updated", "count": len(updated), "items": updated}
+                results.append(r)
+            time.sleep(0.1)
+        return {"result": "updated", "count": len(results), "items": results}
 
-    elif action == "rollback":
-        # 直近スナップショット対象はパラメータ一覧が必要だが、キー列挙APIなしのため
-        # 実在アラーム名に対し存在するスナップショットのみ復元
-        names = [a["AlarmName"] for a in describe_all_metric_alarms()]
+    if action == "rollback":
+        names = [a["AlarmName"] for a in describe_all_metric_alarms() if name_ok(a["AlarmName"])]
         for n in names:
-            r = rollback_one(n)
-            if r:
-                reverted.append(r)
+            r = rollback_one(n, dry_run=dry_run)
+            results.append(r)
             time.sleep(0.05)
-        return {"result": "rolled_back", "count": len(reverted), "items": reverted}
+        return {"result": "rolled_back", "count": len(results), "items": results}
 
-    else:
-        return {"error": "unknown action"}
+    return {"error": "unknown action"}
