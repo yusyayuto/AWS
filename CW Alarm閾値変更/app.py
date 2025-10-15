@@ -2,67 +2,77 @@ import os, json, urllib.parse, time
 import boto3
 
 REGION = os.environ.get("AWS_REGION", "ap-northeast-1")
-PARAM_NAME = os.environ.get("PARAM_NAME")  # 〈パラメータストア名〉
 FORCE_ONE = os.environ.get("FORCE_ONE_DATAPOINT", "false").lower() == "true"
+
+# 退避バックエンド
+S3_BUCKET = os.environ.get("SNAPSHOT_S3_BUCKET")  # 設定されていればS3優先
+PARAM_NAME = os.environ.get("PARAM_NAME")         # SSMはフォールバック用
 
 cw  = boto3.client("cloudwatch", region_name=REGION)
 ssm = boto3.client("ssm",        region_name=REGION)
+s3  = boto3.client("s3") if S3_BUCKET else None
 
 # ---------- しきい値変換ロジック ----------
 def decide_new_threshold(a):
-    # 単一メトリクス以外は対象外（Metricsがある＝メトリックマス/複合想定）
     if "MetricName" not in a or a.get("Metrics"):
         return None
-
     m = (a["MetricName"] or "").lower()
     comp = a["ComparisonOperator"]
     thr  = a["Threshold"]
 
-    # 1 LogicalDisk % Free Space <=10 → <=99.5
     if "logicaldisk" in m and "% free space" in m and comp.endswith("LessThanOrEqualToThreshold") and float(thr) == 10.0:
         return {"ComparisonOperator": comp, "Threshold": 99.5}
 
-    # 2 Memory Available Bytes <= 1717986918 → <= 1e12
     if "memory" in m and "available" in m and "bytes" in m and comp.endswith("LessThanOrEqualToThreshold") and int(thr) == 1717986918:
         return {"ComparisonOperator": comp, "Threshold": 1_000_000_000_000}
 
-    # 3 Processor % Processor Time > 90 → > 1
     if "processor" in m and "% processor time" in m and comp.endswith("GreaterThanThreshold") and float(thr) == 90.0:
         return {"ComparisonOperator": comp, "Threshold": 1.0}
 
-    # 4/5 StatusCheckFailed_* >= 1 → >= 0
     if a["MetricName"] in ("StatusCheckFailed", "StatusCheckFailed_Instance", "StatusCheckFailed_System") \
        and comp.endswith("GreaterThanOrEqualToThreshold") and float(thr) == 1.0:
         return {"ComparisonOperator": comp, "Threshold": 0.0}
 
-    # 6 Windows_service_status < 1 → < 2
     if "windows" in m and "service" in m and "status" in m and comp.endswith("LessThanThreshold") and float(thr) == 1.0:
         return {"ComparisonOperator": comp, "Threshold": 2.0}
 
     return None
 
-# ---------- Parameter Store（アラーム単位で保存） ----------
-def param_key_for_alarm(alarm_name):
-    encoded = urllib.parse.quote(alarm_name, safe='')
-    return f"{PARAM_NAME}/{encoded}"
+# ---------- 退避I/O（S3優先、なければSSM） ----------
+def _s3_key(alarm_name: str) -> str:
+    enc = urllib.parse.quote(alarm_name, safe='')
+    return f"cw-alarm-backup/{REGION}/{enc}.json"
 
-def save_snapshot(alarm_name, payload):
-    ssm.put_parameter(
-        Name=param_key_for_alarm(alarm_name),
-        Type="String",
-        Overwrite=True,
-        Value=json.dumps(payload, ensure_ascii=False)
-    )
+def save_snapshot(alarm_name: str, payload: dict):
+    data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    if S3_BUCKET:
+        s3.put_object(Bucket=S3_BUCKET, Key=_s3_key(alarm_name), Body=data, ContentType="application/json")
+    elif PARAM_NAME:
+        key = f"{PARAM_NAME}/{urllib.parse.quote(alarm_name, safe='')}"
+        ssm.put_parameter(Name=key, Type="String", Overwrite=True, Value=data.decode("utf-8"))
+    else:
+        raise RuntimeError("No snapshot backend. Set SNAPSHOT_S3_BUCKET or PARAM_NAME.")
 
-def load_snapshot(alarm_name):
-    try:
-        r = ssm.get_parameter(Name=param_key_for_alarm(alarm_name))
-        return json.loads(r["Parameter"]["Value"])
-    except ssm.exceptions.ParameterNotFound:
-        return None
+def load_snapshot(alarm_name: str):
+    if S3_BUCKET:
+        try:
+            obj = s3.get_object(Bucket=S3_BUCKET, Key=_s3_key(alarm_name))
+            return json.loads(obj["Body"].read().decode("utf-8"))
+        except s3.exceptions.NoSuchKey:
+            return None
+        except Exception:
+            return None
+    elif PARAM_NAME:
+        try:
+            key = f"{PARAM_NAME}/{urllib.parse.quote(alarm_name, safe='')}"
+            r = ssm.get_parameter(Name=key)
+            return json.loads(r["Parameter"]["Value"])
+        except ssm.exceptions.ParameterNotFound:
+            return None
+    return None
 
-# ---------- put_metric_alarm 用引数構築（全ディメンション含む） ----------
-def build_put_args_from(a):
+# ---------- put_metric_alarm 用引数（全ディメンション含む） ----------
+def build_put_args_from(a: dict) -> dict:
     args = {
         "AlarmName": a["AlarmName"],
         "ComparisonOperator": a["ComparisonOperator"],
@@ -83,7 +93,7 @@ def build_put_args_from(a):
         "TreatMissingData": a.get("TreatMissingData", "missing"),
         "Tags": a.get("Tags", [])
     }
-    return {k:v for k,v in args.items() if v is not None}
+    return {k: v for k, v in args.items() if v is not None}
 
 def describe_all_metric_alarms():
     paginator = cw.get_paginator("describe_alarms")
@@ -93,7 +103,7 @@ def describe_all_metric_alarms():
                 continue
             yield a
 
-def update_one(a, dry_run=False):
+def update_one(a: dict, dry_run=False):
     rule = decide_new_threshold(a)
     if not rule:
         return None
@@ -112,7 +122,7 @@ def update_one(a, dry_run=False):
 
     return {"name": a["AlarmName"], "from": before["Threshold"], "to": after["Threshold"], "dry_run": dry_run}
 
-def rollback_one(name, dry_run=False):
+def rollback_one(name: str, dry_run=False):
     snap = load_snapshot(name)
     if not snap:
         return {"name": name, "status": "skip(no-snapshot)", "dry_run": dry_run}
@@ -126,7 +136,8 @@ def handler(event, context):
     name_prefix = (event or {}).get("name_prefix")
     dry_run = bool((event or {}).get("dry_run", False))
 
-    def name_ok(n): return (not name_prefix) or n.startswith(name_prefix)
+    def name_ok(n: str) -> bool:
+        return (not name_prefix) or n.startswith(name_prefix)
 
     results = []
     if action == "update":
