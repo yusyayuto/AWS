@@ -1,161 +1,71 @@
-import os, json, urllib.parse, time
-import boto3
+# ==== 先頭の環境変数読み出し付近に追加 ====
+MEM_FALLBACK = os.environ.get("MEMORY_BASELINE_FALLBACK")  # "1.6G" or "3.2G" or None
 
-REGION = os.environ.get("AWS_REGION", "ap-northeast-1")
-FORCE_ONE = os.environ.get("FORCE_ONE_DATAPOINT", "false").lower() == "true"
+# ==== ユーティリティとして追加 ====
+def _pick_mem_baseline_from_name(alarm_name: str):
+    n = alarm_name.lower()
+    pat_32 = ("3.2", "3200", "3g", "3gb", "3276", "3435")
+    pat_16 = ("1.6", "1600", "1g", "1gb", "1717")
+    if any(p in n for p in pat_32):
+        return 3435973836.0  # ≈3.2GB
+    if any(p in n for p in pat_16):
+        return 1717986918.0  # ≈1.6GB
+    if MEM_FALLBACK == "3.2G":
+        return 3435973836.0
+    if MEM_FALLBACK == "1.6G":
+        return 1717986918.0
+    return None  # 判定不能
 
-# 退避バックエンド
-S3_BUCKET = os.environ.get("SNAPSHOT_S3_BUCKET")  # 設定されていればS3優先
-PARAM_NAME = os.environ.get("PARAM_NAME")         # SSMはフォールバック用
+# ==== 既存の ROLLBACK_RULES から「Memory」の行は削除してください ====
+# （Disk/CPU/Status/Windows の行はそのまま）
 
-cw  = boto3.client("cloudwatch", region_name=REGION)
-ssm = boto3.client("ssm",        region_name=REGION)
-s3  = boto3.client("s3") if S3_BUCKET else None
-
-# ---------- しきい値変換ロジック ----------
-def decide_new_threshold(a):
-    if "MetricName" not in a or a.get("Metrics"):
-        return None
-    m = (a["MetricName"] or "").lower()
-    comp = a["ComparisonOperator"]
-    thr  = a["Threshold"]
-
-    if "logicaldisk" in m and "% free space" in m and comp.endswith("LessThanOrEqualToThreshold") and float(thr) == 10.0:
-        return {"ComparisonOperator": comp, "Threshold": 99.5}
-
-    if "memory" in m and "available" in m and "bytes" in m and comp.endswith("LessThanOrEqualToThreshold") and int(thr) == 1717986918:
-        return {"ComparisonOperator": comp, "Threshold": 1_000_000_000_000}
-
-    if "processor" in m and "% processor time" in m and comp.endswith("GreaterThanThreshold") and float(thr) == 90.0:
-        return {"ComparisonOperator": comp, "Threshold": 1.0}
-
-    if a["MetricName"] in ("StatusCheckFailed", "StatusCheckFailed_Instance", "StatusCheckFailed_System") \
-       and comp.endswith("GreaterThanOrEqualToThreshold") and float(thr) == 1.0:
-        return {"ComparisonOperator": comp, "Threshold": 0.0}
-
-    if "windows" in m and "service" in m and "status" in m and comp.endswith("LessThanThreshold") and float(thr) == 1.0:
-        return {"ComparisonOperator": comp, "Threshold": 2.0}
-
-    return None
-
-# ---------- 退避I/O（S3優先、なければSSM） ----------
-def _s3_key(alarm_name: str) -> str:
-    enc = urllib.parse.quote(alarm_name, safe='')
-    return f"cw-alarm-backup/{REGION}/{enc}.json"
-
-def save_snapshot(alarm_name: str, payload: dict):
-    data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    if S3_BUCKET:
-        s3.put_object(Bucket=S3_BUCKET, Key=_s3_key(alarm_name), Body=data, ContentType="application/json")
-    elif PARAM_NAME:
-        key = f"{PARAM_NAME}/{urllib.parse.quote(alarm_name, safe='')}"
-        ssm.put_parameter(Name=key, Type="String", Overwrite=True, Value=data.decode("utf-8"))
-    else:
-        raise RuntimeError("No snapshot backend. Set SNAPSHOT_S3_BUCKET or PARAM_NAME.")
-
-def load_snapshot(alarm_name: str):
-    if S3_BUCKET:
-        try:
-            obj = s3.get_object(Bucket=S3_BUCKET, Key=_s3_key(alarm_name))
-            return json.loads(obj["Body"].read().decode("utf-8"))
-        except s3.exceptions.NoSuchKey:
-            return None
-        except Exception:
-            return None
-    elif PARAM_NAME:
-        try:
-            key = f"{PARAM_NAME}/{urllib.parse.quote(alarm_name, safe='')}"
-            r = ssm.get_parameter(Name=key)
-            return json.loads(r["Parameter"]["Value"])
-        except ssm.exceptions.ParameterNotFound:
-            return None
-    return None
-
-# ---------- put_metric_alarm 用引数（全ディメンション含む） ----------
-def build_put_args_from(a: dict) -> dict:
-    args = {
-        "AlarmName": a["AlarmName"],
-        "ComparisonOperator": a["ComparisonOperator"],
-        "Threshold": a["Threshold"],
-        "EvaluationPeriods": a.get("EvaluationPeriods"),
-        "DatapointsToAlarm": a.get("DatapointsToAlarm"),
-        "ActionsEnabled": a.get("ActionsEnabled", True),
-        "AlarmActions": a.get("AlarmActions", []),
-        "OKActions": a.get("OKActions", []),
-        "InsufficientDataActions": a.get("InsufficientDataActions", []),
-        "MetricName": a["MetricName"],
-        "Namespace": a["Namespace"],
-        "Statistic": a.get("Statistic"),
-        "ExtendedStatistic": a.get("ExtendedStatistic"),
-        "Period": a["Period"],
-        "Unit": a.get("Unit"),
-        "Dimensions": a.get("Dimensions", []),
-        "TreatMissingData": a.get("TreatMissingData", "missing"),
-        "Tags": a.get("Tags", [])
-    }
-    return {k: v for k, v in args.items() if v is not None}
-
-def describe_all_metric_alarms():
-    paginator = cw.get_paginator("describe_alarms")
-    for page in paginator.paginate():
-        for a in page.get("MetricAlarms", []):
-            if a.get("Metrics"):
-                continue
-            yield a
-
-def update_one(a: dict, dry_run=False):
-    rule = decide_new_threshold(a)
-    if not rule:
-        return None
-
-    before = build_put_args_from(a)
-    after  = dict(before)
-    after["ComparisonOperator"] = rule["ComparisonOperator"]
-    after["Threshold"] = rule["Threshold"]
-    if FORCE_ONE:
-        after["EvaluationPeriods"] = 1
-        after["DatapointsToAlarm"] = 1
-
-    if not dry_run:
-        cw.put_metric_alarm(**after)
-        save_snapshot(a["AlarmName"], {"before": before, "after": after, "rollback": before})
-
-    return {"name": a["AlarmName"], "from": before["Threshold"], "to": after["Threshold"], "dry_run": dry_run}
-
-def rollback_one(name: str, dry_run=False):
-    snap = load_snapshot(name)
-    if not snap:
-        return {"name": name, "status": "skip(no-snapshot)", "dry_run": dry_run}
-    rb = snap["rollback"]
-    if not dry_run:
-        cw.put_metric_alarm(**rb)
-    return {"name": name, "status": "reverted", "dry_run": dry_run}
-
-def handler(event, context):
-    action = (event or {}).get("action", "update")
-    name_prefix = (event or {}).get("name_prefix")
-    dry_run = bool((event or {}).get("dry_run", False))
-
-    def name_ok(n: str) -> bool:
-        return (not name_prefix) or n.startswith(name_prefix)
-
+# ==== do_rollback 内のループで、汎用ルール適用の前にメモリ専用処理を挿入 ====
+def do_rollback(name_prefix: str | None, dry_run: bool):
     results = []
-    if action == "update":
-        for a in describe_all_metric_alarms():
-            if not name_ok(a["AlarmName"]):
-                continue
-            r = update_one(a, dry_run=dry_run)
-            if r:
-                results.append(r)
-            time.sleep(0.1)
-        return {"result": "updated", "count": len(results), "items": results}
+    for a in describe_all_metric_alarms():
+        if name_prefix and not a["AlarmName"].startswith(name_prefix):
+            continue
 
-    if action == "rollback":
-        names = [a["AlarmName"] for a in describe_all_metric_alarms() if name_ok(a["AlarmName"])]
-        for n in names:
-            r = rollback_one(n, dry_run=dry_run)
-            results.append(r)
+        metric = a["MetricName"]
+        op = a["ComparisonOperator"]
+        thr = float(a["Threshold"])
+
+        # --- Memory Available Bytes の専用ロールバック ---
+        if (metric == "Memory Available Bytes"
+            and op == "LessThanOrEqualToThreshold"
+            and thr == 1_000_000_000_000.0):
+            base = _pick_mem_baseline_from_name(a["AlarmName"])
+            if base is None:
+                results.append({"name": a["AlarmName"], "status": "skip(mem-ambiguous)"})
+            else:
+                rb = build_put_args_from(a)
+                rb["Threshold"] = base
+                if not dry_run:
+                    cw.put_metric_alarm(**rb)
+                after_live = describe_alarm_by_name(a["AlarmName"]) if not dry_run else rb
+                if after_live:
+                    snapshot_merge_write(a["AlarmName"], "rollback", build_put_args_from(after_live))
+                results.append({"name": a["AlarmName"], "restored_to": base, "op": rb["ComparisonOperator"], "dry_run": dry_run})
             time.sleep(0.05)
-        return {"result": "rolled_back", "count": len(results), "items": results}
+            continue  # メモリはここで処理完了
 
-    return {"error": "unknown action"}
+        # --- それ以外は既存の汎用 ROLLBACK_RULES を適用 ---
+        restored = None
+        for rule in ROLLBACK_RULES:
+            ok, rb = _apply_rule_if_match(a, rule)
+            if ok:
+                restored = rb
+                break
+        if not restored:
+            results.append({"name": a["AlarmName"], "status": "skip(no-rollback-match)"})
+            continue
+
+        if not dry_run:
+            cw.put_metric_alarm(**restored)
+        after_live = describe_alarm_by_name(a["AlarmName"]) if not dry_run else restored
+        if after_live:
+            snapshot_merge_write(a["AlarmName"], "rollback", build_put_args_from(after_live))
+        results.append({"name": a["AlarmName"], "restored_to": restored["Threshold"], "op": restored["ComparisonOperator"], "dry_run": dry_run})
+        time.sleep(0.05)
+
+    return {"result": "rolled_back", "count": len(results), "items": results}
