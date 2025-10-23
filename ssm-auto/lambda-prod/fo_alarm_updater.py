@@ -1,99 +1,180 @@
-import json
-import boto3
-import os
+# fo_alarm_updater.py
+import boto3, os, json, traceback
+from typing import List, Dict, Any, Tuple
 
-cw = boto3.client("cloudwatch")
-TAG_KEY = os.environ.get("TAG_KEY", "failover")
+cw  = boto3.client("cloudwatch")
+rgt = boto3.client("resourcegroupstaggingapi")
 
-def lambda_handler(event, context):
-    """
-    更新対象:
-      - タグキー failover の値が event["AlarmName"] と一致するアラーム
-    更新内容:
-      - Dimensions 内の InstanceId と ImageId を新しい値に置換
-    """
-    print("### Raw Event ###")
-    print(json.dumps(event, ensure_ascii=False, indent=2))
+LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
+DEFAULT_TAG_KEY = os.environ.get("TAG_KEY", "failover")  # ← 既定は failover
 
-    # --- パラメータ取得 ---
-    alarm_name = event.get("AlarmName")
-    new_instance_id = event.get("NewInstanceId")
-    new_ami_id = event.get("NewAmiId")
+def _log(level: str, msg: str, **kw):
+    if level == "ERROR" or LOG_LEVEL == "DEBUG":
+        print(json.dumps({"level": level, "msg": msg, **kw}, ensure_ascii=False))
 
-    if not alarm_name or not new_instance_id:
-        return {"status": "error", "reason": "missing AlarmName or NewInstanceId"}
+def _as_int(v):
+    try: return int(v)
+    except: return None
 
-    print(f"Processing alarms tagged with {TAG_KEY}={alarm_name}")
+def _as_float(v):
+    try: return float(v)
+    except: return None
 
-    updated_count = 0
-    skipped_count = 0
+def _as_bool(v):
+    if isinstance(v, bool): return v
+    if isinstance(v, str):  return v.lower() == "true"
+    return bool(v) if v is not None else None
 
-    # --- すべてのアラームを取得 ---
-    paginator = cw.get_paginator("describe_alarms")
-    for page in paginator.paginate():
-        for alarm in page.get("MetricAlarms", []):
-            alarm_arn = alarm.get("AlarmArn")
+def _replace_dims(dims: List[Dict[str, Any]], new_iid: str, new_ami: str|None) -> Tuple[bool, List[Dict[str, Any]]]:
+    """Dimensions 内の InstanceId / ImageId を新値に置換（存在時のみ）。変更有無と新配列を返す"""
+    if not dims: return False, dims
+    changed = False
+    for d in dims:
+        if d.get("Name") == "InstanceId" and new_iid and d.get("Value") != new_iid:
+            d["Value"] = new_iid; changed = True
+        elif d.get("Name") == "ImageId" and new_ami and d.get("Value") != new_ami:
+            d["Value"] = new_ami; changed = True
+    return changed, dims
 
-            # タグ取得
-            try:
-                tags_response = cw.list_tags_for_resource(ResourceARN=alarm_arn)
-                tags = {t["Key"]: t["Value"] for t in tags_response.get("Tags", [])}
-            except Exception as e:
-                print(f"Tag fetch failed for {alarm_arn}: {e}")
-                continue
+def _list_alarms_by_tag(tag_key: str, tag_value: str) -> List[str]:
+    """Resource Groups Tagging API でタグ一致する CloudWatch アラーム名を列挙"""
+    names: List[str] = []
+    token: str = ""
+    while True:
+        resp = rgt.get_resources(
+            ResourceTypeFilters=['cloudwatch:alarm'],
+            TagFilters=[{'Key': tag_key, 'Values': [tag_value]}],
+            PaginationToken=token
+        )
+        for m in resp.get('ResourceTagMappingList', []):
+            arn = m['ResourceARN']                 # arn:aws:cloudwatch:region:acct:alarm:AlarmName
+            name = arn.split(':alarm:', 1)[1]
+            names.append(name)
+        token = resp.get('PaginationToken') or ""
+        if not token:
+            break
+    return names
 
-            # タグが一致しない場合スキップ
-            if tags.get(TAG_KEY) != alarm_name:
-                continue
-
-            # --- Dimensionsの書き換え ---
-            changed = False
-            for dim in alarm.get("Dimensions", []):
-                if dim["Name"] == "InstanceId" and dim["Value"] != new_instance_id:
-                    print(f"Updating InstanceId: {dim['Value']} → {new_instance_id}")
-                    dim["Value"] = new_instance_id
-                    changed = True
-                elif dim["Name"] == "ImageId" and new_ami_id and dim["Value"] != new_ami_id:
-                    print(f"Updating ImageId: {dim['Value']} → {new_ami_id}")
-                    dim["Value"] = new_ami_id
-                    changed = True
-
-            # 変更がない場合はスキップ
-            if not changed:
-                skipped_count += 1
-                continue
-
-            # --- アラーム再登録 ---
-            try:
-                cw.put_metric_alarm(
-                    AlarmName=alarm["AlarmName"],
-                    ComparisonOperator=alarm["ComparisonOperator"],
-                    EvaluationPeriods=alarm["EvaluationPeriods"],
-                    MetricName=alarm["MetricName"],
-                    Namespace=alarm["Namespace"],
-                    Period=alarm["Period"],
-                    Statistic=alarm.get("Statistic"),
-                    ExtendedStatistic=alarm.get("ExtendedStatistic"),
-                    Threshold=alarm["Threshold"],
-                    ActionsEnabled=alarm["ActionsEnabled"],
-                    AlarmActions=alarm.get("AlarmActions", []),
-                    OKActions=alarm.get("OKActions", []),
-                    InsufficientDataActions=alarm.get("InsufficientDataActions", []),
-                    Dimensions=alarm["Dimensions"],
-                    Unit=alarm.get("Unit"),
-                    TreatMissingData=alarm.get("TreatMissingData", "missing"),
-                    Tags=[{"Key": k, "Value": v} for k, v in tags.items()],
-                )
-                print("Updated alarm: {alarm['AlarmName']}")
-                updated_count += 1
-            except Exception as e:
-                print("Failed to update {alarm['AlarmName']}: {e}")
-
-    result = {
-        "status": "completed",
-        "targetAlarm": alarm_name,
-        "updated": updated_count,
-        "skipped": skipped_count,
+def _put_metric_alarm_single(ma: Dict[str, Any], dims: List[Dict[str, Any]]):
+    """単一メトリクスの再定義（必須項目を全指定）"""
+    req = {
+        "AlarmName": ma["AlarmName"],
+        "AlarmDescription": ma.get("AlarmDescription"),
+        "ActionsEnabled": _as_bool(ma.get("ActionsEnabled", True)),
+        "OKActions": ma.get("OKActions") or [],
+        "AlarmActions": ma.get("AlarmActions") or [],
+        "InsufficientDataActions": ma.get("InsufficientDataActions") or [],
+        "Namespace": ma.get("Namespace"),
+        "MetricName": ma.get("MetricName"),
+        "Dimensions": dims,
+        "Period": _as_int(ma.get("Period")),
+        "EvaluationPeriods": _as_int(ma.get("EvaluationPeriods")),
+        "DatapointsToAlarm": _as_int(ma.get("DatapointsToAlarm")) if ma.get("DatapointsToAlarm") is not None else None,
+        "Threshold": _as_float(ma.get("Threshold")),
+        "ComparisonOperator": ma.get("ComparisonOperator"),
+        "TreatMissingData": ma.get("TreatMissingData"),
+        "EvaluateLowSampleCountPercentile": ma.get("EvaluateLowSampleCountPercentile"),
+        "Unit": ma.get("Unit"),
     }
-    print(json.dumps(result, ensure_ascii=False, indent=2))
-    return result
+    if ma.get("ExtendedStatistic"):
+        req["ExtendedStatistic"] = ma["ExtendedStatistic"]
+    elif ma.get("Statistic"):
+        req["Statistic"] = ma["Statistic"]
+    req = {k: v for k, v in req.items() if v is not None}
+    cw.put_metric_alarm(**req)
+
+def _put_metric_alarm_math(ma: Dict[str, Any], metrics: List[Dict[str, Any]]):
+    """Metric Math / Metrics[] の再定義（必須項目を全指定）"""
+    req = {
+        "AlarmName": ma["AlarmName"],
+        "AlarmDescription": ma.get("AlarmDescription"),
+        "ActionsEnabled": _as_bool(ma.get("ActionsEnabled", True)),
+        "OKActions": ma.get("OKActions") or [],
+        "AlarmActions": ma.get("AlarmActions") or [],
+        "InsufficientDataActions": ma.get("InsufficientDataActions") or [],
+        "EvaluationPeriods": _as_int(ma.get("EvaluationPeriods")),
+        "DatapointsToAlarm": _as_int(ma.get("DatapointsToAlarm")) if ma.get("DatapointsToAlarm") is not None else None,
+        "Threshold": _as_float(ma.get("Threshold")),
+        "ComparisonOperator": ma.get("ComparisonOperator"),
+        "TreatMissingData": ma.get("TreatMissingData"),
+        "EvaluateLowSampleCountPercentile": ma.get("EvaluateLowSampleCountPercentile"),
+        "Metrics": metrics
+    }
+    if ma.get("ThresholdMetricId"):
+        req["ThresholdMetricId"] = ma["ThresholdMetricId"]
+    req = {k: v for k, v in req.items() if v is not None}
+    cw.put_metric_alarm(**req)
+
+def lambda_handler(event, _):
+    """
+    期待入力:
+      NewInstanceId (str) : 新インスタンスID（必須）
+      TagValue      (str) : タグ値＝複合アラーム名（必須）
+      AlarmName     (str) : （同上。TagValueが無ければこちらを見る）
+      NewAmiId      (str) : 新AMI ID（任意）
+      TagKey        (str) : 省略可（既定: failover or env TAG_KEY）
+    """
+    newi = event.get("NewInstanceId")
+    tag_value = event.get("TagValue") or event.get("AlarmName")
+    tag_key = event.get("TagKey") or DEFAULT_TAG_KEY
+    new_ami = event.get("NewAmiId")
+
+    if not (newi and tag_value):
+        return {"ok": False, "reason": "missing required fields", "event": event}
+
+    targets = _list_alarms_by_tag(tag_key, tag_value)
+    _log("DEBUG", "targets resolved by tag", tagKey=tag_key, tagValue=tag_value, targets=targets)
+
+    updated, skipped, errors = [], [], []
+
+    for name in targets:
+        try:
+            d = cw.describe_alarms(AlarmNames=[name])
+            mals = d.get("MetricAlarms", [])
+            if not mals:
+                skipped.append({"alarm": name, "reason": "not_metric_alarm"})
+                continue
+            ma = mals[0]
+
+            if ma.get("Metrics"):
+                # Metric Math
+                new_metrics = []
+                changed_any = False
+                for q in ma["Metrics"]:
+                    q2 = json.loads(json.dumps(q))  # deep copy
+                    ms = q2.get("MetricStat")
+                    if ms and ms.get("Metric"):
+                        dims = ms["Metric"].get("Dimensions", [])
+                        changed, dims2 = _replace_dims(dims, newi, new_ami)
+                        if changed:
+                            ms["Metric"]["Dimensions"] = dims2
+                            q2["MetricStat"] = ms
+                            changed_any = True
+                    new_metrics.append(q2)
+                if not changed_any:
+                    skipped.append({"alarm": name, "reason": "no_dimension_change"})
+                    continue
+                _put_metric_alarm_math(ma, new_metrics)
+
+            else:
+                # 単一メトリクス
+                dims = list(ma.get("Dimensions", []))
+                changed, dims2 = _replace_dims(dims, newi, new_ami)
+                if not changed:
+                    skipped.append({"alarm": name, "reason": "no_dimension_change"})
+                    continue
+                _put_metric_alarm_single(ma, dims2)
+
+            updated.append(name)
+
+        except Exception as e:
+            errors.append({"alarm": name, "error": str(e), "trace": traceback.format_exc()})
+
+    return {
+        "ok": True,
+        "tagKey": tag_key,
+        "tagValue": tag_value,
+        "updated": updated,
+        "skipped": skipped,
+        "errors": errors
+    }
