@@ -1,0 +1,23 @@
+#イベントパターン
+{
+  "source": ["aws.ssm"],
+  "detail-type": ["EC2 Automation Execution Status-change"],
+  "detail": {
+    "documentName": ["<AutomationDocumentName>"],
+    "status": ["Success", "Failed"]
+  }
+}
+
+#入力トランスフォーマ（Input transformer）
+#入力パス
+{
+  "execId": "$.detail.executionId",
+  "status": "$.detail.status",
+  "doc": "$.detail.documentName"
+}
+#入力テンプレート
+{
+  "ExecutionId": <execId>,
+  "Status": <status>,
+  "DocumentName": <doc>
+}
