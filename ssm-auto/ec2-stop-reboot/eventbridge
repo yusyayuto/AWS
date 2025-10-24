@@ -1,0 +1,27 @@
+#イベントパターン
+{
+  "source": ["aws.ec2"],
+  "detail-type": ["EC2 Instance State-change Notification"],
+  "detail": {
+    "state": ["stopping", "stopped", "shutting-down", "terminated"]
+  }
+}
+
+#入力トランスフォーマー
+#入力パスのマッピング
+{
+  "iid": "$.detail.instance-id",
+  "region": "$.region",
+  "time": "$.time",
+  "state": "$.detail.state",
+  "id": "$.id"
+}
+#変換テンプレート
+{
+  "type": "EC2_STATE_CHANGE",
+  "instance_id": <iid>,
+  "region": <region>,
+  "event_time": <time>,
+  "state": <state>,
+  "event_id": <id>
+}
