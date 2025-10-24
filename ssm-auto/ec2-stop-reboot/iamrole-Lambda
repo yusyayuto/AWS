@@ -1,0 +1,17 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    { "Effect": "Allow",
+      "Action": ["ec2:DescribeInstances"],
+      "Resource": "*" },
+    { "Effect": "Allow",
+      "Action": ["dynamodb:PutItem","dynamodb:GetItem"],
+      "Resource": "arn:aws:dynamodb:<region>:<account-id>:table/ec2-events-dedup" },
+    { "Effect": "Allow",
+      "Action": ["ssm:StartAutomationExecution"],
+      "Resource": "*" },
+    { "Effect": "Allow",
+      "Action": ["logs:CreateLogGroup","logs:CreateLogStream","logs:PutLogEvents"],
+      "Resource": "*" }
+  ]
+}
