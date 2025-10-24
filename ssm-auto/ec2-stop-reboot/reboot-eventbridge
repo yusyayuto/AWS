@@ -1,0 +1,26 @@
+#イベントパターン
+{
+  "source": ["aws.ec2"],
+  "detail-type": ["AWS API Call via CloudTrail"],
+  "detail": {
+    "eventSource": ["ec2.amazonaws.com"],
+    "eventName": ["RebootInstances"]
+  }
+}
+
+#入力トランスフォーマー
+#入力パス
+{
+  "iid": "$.detail.requestParameters.instancesSet.items[0].instanceId",
+  "region": "$.region",
+  "time": "$.time",
+  "id": "$.id"
+}
+#変換テンプレート
+{
+  "type": "EC2_REBOOT",
+  "instance_id": <iid>,
+  "region": <region>,
+  "event_time": <time>,
+  "event_id": <id>
+}
