@@ -1,12 +1,10 @@
-# ssm_automation_notifier.py
-import os, json, boto3
+import os, boto3
 
 ssm = boto3.client("ssm")
 sns = boto3.client("sns")
 TOPIC = os.environ["SNS_TOPIC_ARN"]
 
 def _get_new_instance_id(step_execs):
-    # 例：ランブック内の runInstances ステップの出力 "InstanceId" を拾う
     for s in step_execs:
         if s.get("StepName") == "runInstances":
             outs = s.get("Outputs") or {}
@@ -22,49 +20,59 @@ def _get_failed_step(step_execs):
     return None, None
 
 def lambda_handler(event, _):
-    # EventBridge input-transformer から受領
-    exec_id = event.get("ExecutionId")
-    status  = event.get("Status")
-    doc     = event.get("DocumentName")
+    detail = event.get("detail", {})
+    exec_id = detail.get("ExecutionId")
+    status  = detail.get("Status")
+    doc     = detail.get("Definition")
 
     if not exec_id or not status:
         return {"ok": False, "reason": "missing ExecutionId/Status", "event": event}
 
-    # 実行詳細
     ae = ssm.get_automation_execution(AutomationExecutionId=exec_id)["AutomationExecution"]
     params = ae.get("Parameters") or {}
     old_iid = (params.get("UnhealthyInstanceId") or params.get("InstanceId") or [""])[0]
 
-    # ステップ詳細（新インスタンスIDや失敗箇所取得用）
+    # ステップ詳細
     steps_resp = ssm.describe_automation_step_executions(
         AutomationExecutionId=exec_id,
-        ReverseOrder=True  # 直近から
+        ReverseOrder=True
     )
     steps = steps_resp.get("StepExecutions", [])
 
-    subject = body = ""
+    # 本文データをリスト化（Success以外は失敗・タイムアウト共通）
     if status == "Success":
         new_iid = _get_new_instance_id(steps) or "<unknown>"
-        subject = f"[SUCCESS] SSM Automation {doc}"
-        body = (
-            "フェイルオーバー処理が成功しました。\n\n"
-            f"- Document : {doc}\n"
-            f"- ExecutionId : {exec_id}\n"
-            f"- 旧インスタンスID : {old_iid}\n"
-            f"- 新インスタンスID : {new_iid}\n\n"
+        info_array = [
+            f"Document : {doc}",
+            f"ExecutionId : {exec_id}",
+            f"旧インスタンスID : {old_iid}",
+            f"新インスタンスID : {new_iid}", 
             "新インスタンスでアプリ/監視等が想定通り稼働しているか確認してください。"
-        )
-    else:  # Failed
-        failed_step, failure_msg = _get_failed_step(steps)
-        subject = f"[FAILED] SSM Automation {doc}"
-        body = (
-            "フェイルオーバー処理が失敗しました。運用手順書に従い手動で切替を実施してください。\n\n"
-            f"- Document : {doc}\n"
-            f"- ExecutionId : {exec_id}\n"
-            f"- 失敗ステップ : {failed_step or '<unknown>'}\n"
-            f"- 失敗メッセージ : {failure_msg or '<none>'}\n"
-            f"- 旧インスタンスID : {old_iid}\n"
-        )
+        ]
+        subject = f"[SUCCESS] SSM Automation {doc}"
+        body = ["フェイルオーバー処理が成功しました。"] + info_array
 
-    sns.publish(TopicArn=TOPIC, Subject=subject, Message=body)
-    return {"ok": True, "status": status, "subject": subject}
+    elif status in ["Failed", "TimedOut"]:
+        failed_step, failure_msg = _get_failed_step(steps)
+        info_array = [
+            "＜ここに記載可能＞",
+            f"Document : {doc}",
+            f"ExecutionId : {exec_id}",
+            f"失敗ステップ : {failed_step or '<unknown>'}",
+            f"失敗メッセージ : {failure_msg or '<none>'}",
+            f"旧インスタンスID : {old_iid}"
+        ]
+        subject = f"[{status.upper()}] SSM Automation {doc}"
+        body = info_array
+
+    else:
+        subject = f"[{status}] SSM Automation {doc}"
+        body = [f"想定外のステータスです: {status}"]
+
+    # 通知（リストを文字列に結合して送信）
+    sns.publish(
+        TopicArn=TOPIC,
+        Subject=subject,
+        Message="\n".join(body)
+    )
+    return {"ok": True, "status": status, "subject": subject, "body": body}
