@@ -1,23 +1,44 @@
 #イベントパターン
+成功通知ルール
 {
   "source": ["aws.ssm"],
-  "detail-type": ["EC2 Automation Execution Status-change"],
+  "detail-type": ["EC2 Automation Execution Status-change Notification"],
   "detail": {
-    "documentName": ["<AutomationDocumentName>"],
-    "status": ["Success", "Failed"]
+    "Status": ["Success", "Failed", "TimedOut", "Canceled"],
+    "Definition": ["runcommand1"]   // 対象Runbook。複数可
   }
 }
 
+
+
 #入力トランスフォーマ（Input transformer）
 #入力パス
-{
-  "execId": "$.detail.executionId",
-  "status": "$.detail.status",
-  "doc": "$.detail.documentName"
+InputPathsMap: {
+  "exec":   "$.detail.ExecutionId",
+  "doc":    "$.detail.Definition",
+  "status": "$.detail.Status",
+  "start":  "$.detail.StartTime",
+  "end":    "$.detail.EndTime",
+  "region": "$.region",
+  "account":"$.account",
+  "evt":    "$.time"
 }
+
+
 #入力テンプレート
-{
-  "ExecutionId": <execId>,
-  "Status": <status>,
-  "DocumentName": <doc>
-}
+InputTemplate: "{
+  \"source\":\"aws.ssm\",
+  \"detail-type\":\"EC2 Automation Execution Status-change Notification\",
+  \"account\":\"<account>\",
+  \"region\":\"<region>\",
+  \"time\":\"<evt>\",
+  \"detail\":{
+    \"ExecutionId\":\"<exec>\",
+    \"Definition\":\"<doc>\",
+    \"DefinitionVersion\":\"<ver>\",
+    \"Status\":\"<status>\",
+    \"StartTime\":\"<start>\",
+    \"EndTime\":\"<end>\"
+  }
+}"
+
