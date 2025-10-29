@@ -35,7 +35,6 @@ InputTemplate: "{
   \"detail\":{
     \"ExecutionId\":\"<exec>\",
     \"Definition\":\"<doc>\",
-    \"DefinitionVersion\":\"<ver>\",
     \"Status\":\"<status>\",
     \"StartTime\":\"<start>\",
     \"EndTime\":\"<end>\"
