@@ -1,0 +1,226 @@
+Step 3: AWS CLIでログイン
+ローカル環境で:
+# リージョンとアカウントIDを自分の環境に合わせて変更
+aws ecr get-login-password --region ap-northeast-1 | docker login --username AWS --password-stdin 123456789012.dkr.ecr.ap-northeast-1.amazonaws.com
+```
+
+**成功メッセージ:**
+```
+Login Succeeded
+
+Step 4: イメージをビルド
+# ECR URIを自分の環境に合わせて変更
+docker build -t batch-job-simulator .
+docker tag batch-job-simulator:latest 123456789012.dkr.ecr.ap-northeast-1.amazonaws.com/batch-job-simulator:latest
+
+Step 5: イメージをプッシュ
+docker push 123456789012.dkr.ecr.ap-northeast-1.amazonaws.com/batch-job-simulator:latest
+```
+
+**プッシュが完了すると:**
+```
+latest: digest: sha256:abc123... size: 1234
+```
+
+**✅ ECRにイメージが保存されました!**
+
+---
+
+## 🎯 Phase 3: AWS Batch設定
+
+ここが本番!3つのコンポーネントを作ります。
+
+### **全体構成の理解:**
+```
+Compute Environment (計算環境)
+  ↓ どこで実行する?
+Job Queue (ジョブキュー)
+  ↓ どの順番で実行する?
+Job Definition (ジョブ定義)
+  ↓ 何を実行する?
+```
+
+---
+
+### **Step 1: Compute Environment作成**
+```
+1. AWS Batch コンソールを開く
+2. 左メニュー「コンピューティング環境」
+3. 「作成」ボタンをクリック
+```
+
+---
+
+#### **オーケストレーションタイプ:**
+```
+☑ AWS Fargate
+```
+
+**理由:**
+- サーバー管理不要
+- 自動スケール
+- 検証に最適
+
+---
+
+#### **コンピューティング環境の設定:**
+```
+名前: batch-compute-env
+
+サービスロール:
+  ☑ 新しいサービスロールを作成
+  (自動で作成されます)
+```
+
+---
+
+#### **インスタンス設定:**
+```
+最大vCPU数: 16
+(これは同時実行可能な最大リソース)
+```
+
+---
+
+#### **ネットワーク設定:**
+```
+VPC: デフォルトVPC (または既存のVPC)
+
+サブネット: 
+  ☑ すべて選択 (または複数選択)
+
+セキュリティグループ:
+  デフォルト (または既存のSG)
+```
+
+**⚠️ 重要:**
+- RDSに接続する予定なら、RDSと同じVPCを選択
+- 今は検証なのでデフォルトでOK
+
+---
+
+**「作成」ボタンをクリック**
+
+**✅ Compute Environment完成!**
+
+---
+
+### **Step 2: Job Queue作成**
+```
+左メニュー「ジョブキュー」
+「作成」ボタンをクリック
+```
+
+---
+
+#### **設定:**
+```
+名前: batch-job-queue
+
+優先度: 1
+
+コンピューティング環境を選択:
+  ☑ batch-compute-env (先ほど作成したもの)
+```
+
+---
+
+**「作成」ボタンをクリック**
+
+**✅ Job Queue完成!**
+
+---
+
+### **Step 3: Job Definition作成**
+```
+左メニュー「ジョブ定義」
+「作成」ボタンをクリック
+```
+
+---
+
+#### **オーケストレーションタイプ:**
+```
+☑ Fargate
+```
+
+---
+
+#### **ジョブ定義の設定:**
+```
+名前: batch-job-definition
+
+実行タイムアウト: 600 秒 (10分)
+(必要に応じて変更可能)
+```
+
+---
+
+#### **コンテナプロパティ:**
+```
+イメージ: 
+  123456789012.dkr.ecr.ap-northeast-1.amazonaws.com/batch-job-simulator:latest
+  (ECRのURI)
+
+コマンド: (空欄でOK、Dockerfileに記載済み)
+
+実行ロール:
+  ☑ 新しいロールを作成
+  (自動で作成されます)
+```
+
+---
+
+#### **リソース設定:**
+```
+vCPU: 0.25
+メモリ: 512 MiB
+
+(検証用なので最小構成)
+```
+
+---
+
+#### **環境変数 (オプション):**
+```
+今回は不要
+(将来的に成功率を制御したい場合に使用)
+```
+
+---
+
+#### **ログ設定:**
+```
+☑ CloudWatch Logs を使用
+
+ロググループ: /aws/batch/job
+```
+
+**⚠️ 重要:**
+- このロググループ名を覚えておく
+- 後でMetric Filterを設定します
+
+---
+
+#### **リトライ戦略:**
+```
+ジョブの試行回数: 3
+(失敗時に最大3回リトライ)
+```
+
+---
+
+**「作成」ボタンをクリック**
+
+**✅ Job Definition完成!**
+
+---
+
+## 🎯 ここまでの確認
+```
+✅ Dockerコンテナ作成
+✅ ECRにプッシュ
+✅ Compute Environment作成
+✅ Job Queue作成
+✅ Job Definition作成
+
