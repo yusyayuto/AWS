@@ -1,0 +1,61 @@
+# イメージをビルド
+docker build -t batch-job:test .
+
+# 実行
+docker run batch-job:test
+```
+
+**期待される出力:**
+```
+[INFO] Job started: job-1699354245-5678
+{"timestamp": "2025-11-07T10:30:45.123Z", "job_id": "job-1699354245-5678", "status": "SUCCEEDED", "duration": 1.234, "message": "Job completed successfully"}
+[INFO] Job succeeded: job-1699354245-5678
+```
+
+または
+```
+[INFO] Job started: job-1699354305-9012
+{"timestamp": "2025-11-07T10:31:45.456Z", "job_id": "job-1699354305-9012", "status": "FAILED", "duration": 0.567, "message": "Job failed due to simulated error"}
+[ERROR] Job failed: job-1699354305-9012
+```
+
+** これが出力されればOK!**
+
+---
+
+##  Phase 2: ECRにプッシュ
+
+### **Step 1: ECRリポジトリ作成**
+
+AWSマネジメントコンソール:
+```
+1. ECR (Elastic Container Registry) を検索
+2. 「リポジトリを作成」をクリック
+```
+
+**設定:**
+```
+リポジトリ名: batch-job-simulator
+
+可視性の設定:
+  ☑ プライベート
+
+タグのイミュータビリティ:
+  □ 有効化 (今回は無効でOK)
+
+イメージスキャン:
+  □ 有効化 (今回は無効でOK)
+
+暗号化設定:
+  ☑ AES-256 (デフォルト)
+```
+
+**「リポジトリを作成」をクリック**
+
+---
+
+### **Step 2: プッシュコマンドを取得**
+
+作成したリポジトリをクリック:
+```
+「プッシュコマンドを表示」ボタンをクリック
