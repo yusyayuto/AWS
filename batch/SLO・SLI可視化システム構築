@@ -1,0 +1,27 @@
+SLO/SLI可視化システム構築
+#SLO/SLI目標値測定方法測定サービス分析可視化方法
+1スループット≥100ジョブ/分ログの成功+失敗数を集計CloudWatch Logs + Metric Filter完了ジョブ数/分折れ線グラフ (Sum, 1分)
+2Retry発生率≤1%EventBridgeのattemptsリスト長EventBridge + Lambda + CloudWatch MetricsRetry数/全ジョブ数×100折れ線グラフ (%)
+3ジョブ成功率≥99.5%ログのstatusフィールド集計CloudWatch Logs + Metric Filter成功数/(成功+失敗)×100折れ線グラフ (%) + SLOライン
+4待機時間(P95)≤1分EventBridgeのタイムスタンプ差分EventBridge + Lambda + CloudWatch Metrics(開始時刻-投入時刻)折れ線グラフ (P95統計)
+5処理時間(P95)≤15分コード内で実測した処理時間CloudWatch Logs + Metric Filtertime.time()の差分折れ線グラフ (P95統計)
+
+アーキテクチャ概要
+EventBridge Scheduler (1分ごと)
+  ↓
+AWS Batch (Fargate)
+  ├→ ECRからコンテナイメージ取得
+  ├→ ジョブ実行
+  └→ CloudWatch Logsにログ出力
+      ↓
+      ├→ Metric Filter (成功率・スループット・処理時間)
+      └→ CloudWatch Metrics
+  
+AWS Batch
+  └→ EventBridge (ステータス変化を自動送信)
+      ↓
+      Lambda (metrics-collector)
+        └→ CloudWatch Metrics (待機時間・Retry率)
+  
+CloudWatch Dashboard
+  └→ 5つのウィジェットで全指標を可視化
