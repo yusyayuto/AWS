@@ -1,0 +1,4 @@
+{
+  "statusCode": 200,
+  "body": "{\"message\": \"Metrics calculated and sent successfully\", \"total_alerts\": 1, \"false_positive_rate\": null, \"average_delay_time\": ...}"
+}
