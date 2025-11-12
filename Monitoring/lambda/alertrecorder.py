@@ -1,10 +1,14 @@
 import json
 import boto3
 import uuid
+import os
 from datetime import datetime
 
+# 環境変数からテーブル名を取得
+TABLE_NAME = os.environ.get('DYNAMODB_TABLE_NAME', 'MonitoringAlerts')
+
 dynamodb = boto3.resource('dynamodb')
-table = dynamodb.Table('MonitoringAlerts')
+table = dynamodb.Table(TABLE_NAME)
 
 def lambda_handler(event, context):
     # SNSメッセージを取得
