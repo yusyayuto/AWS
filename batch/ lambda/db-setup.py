@@ -2,18 +2,36 @@ import json
 import boto3
 
 def lambda_handler(event, context):
-    # Secrets Manager から認証情報取得
     client = boto3.client('secretsmanager')
-    
-    # 実際のシークレット ARN に置き換えてください
     secret_arn = 'arn:aws:secretsmanager:ap-northeast-1:832362088330:secret:rds!db-xxxxxxxx'
     
     response = client.get_secret_value(SecretId=secret_arn)
     creds = json.loads(response['SecretString'])
     
-    # psycopg2 が使えない場合は pg8000 を使用
     import pg8000
     
+    # postgres データベースに接続
+    conn = pg8000.connect(
+        host=creds['host'],
+        database=creds.get('dbname', 'postgres'),
+        user=creds['username'],
+        password=creds['password'],
+        port=int(creds['port'])
+    )
+    
+    cursor = conn.cursor()
+    
+    # batch_etl データベース作成
+    cursor.execute("SELECT 1 FROM pg_database WHERE datname='batch_etl'")
+    if not cursor.fetchone():
+        conn.autocommit = True
+        cursor.execute("CREATE DATABASE batch_etl")
+        conn.autocommit = False
+    
+    cursor.close()
+    conn.close()
+    
+    # batch_etl に接続し直す
     conn = pg8000.connect(
         host=creds['host'],
         database='batch_etl',
@@ -24,7 +42,7 @@ def lambda_handler(event, context):
     
     cursor = conn.cursor()
     
-    # テーブル作成
+    # orders テーブル
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS orders (
             order_id SERIAL PRIMARY KEY,
@@ -39,6 +57,7 @@ def lambda_handler(event, context):
         )
     """)
     
+    # daily_summary テーブル
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS daily_summary (
             summary_id SERIAL PRIMARY KEY,
@@ -50,6 +69,21 @@ def lambda_handler(event, context):
             total_amount DECIMAL(12, 2) NOT NULL,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(summary_date, region, product_id)
+        )
+    """)
+    
+    # etl_job_history テーブル
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS etl_job_history (
+            job_id SERIAL PRIMARY KEY,
+            job_name VARCHAR(100) NOT NULL,
+            execution_date DATE NOT NULL,
+            start_time TIMESTAMP NOT NULL,
+            end_time TIMESTAMP,
+            status VARCHAR(20) NOT NULL,
+            records_processed INTEGER,
+            error_message TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
     
@@ -87,7 +121,8 @@ def lambda_handler(event, context):
         'statusCode': 200,
         'body': json.dumps({
             'message': 'Database setup completed',
-            'tables_created': ['orders', 'daily_summary'],
+            'database': 'batch_etl',
+            'tables_created': ['orders', 'daily_summary', 'etl_job_history'],
             'sample_data_inserted': inserted
         })
     }
