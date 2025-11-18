@@ -1,9 +1,20 @@
 import json
+import os
 import boto3
 
 def lambda_handler(event, context):
+    # 環境変数から Secret ARN を取得
+    secret_arn = os.environ.get('DB_SECRET_ARN')
+    
+    if not secret_arn:
+        return {
+            'statusCode': 400,
+            'body': json.dumps({
+                'error': '環境変数 DB_SECRET_ARN が設定されていません'
+            })
+        }
+    
     client = boto3.client('secretsmanager')
-    secret_arn = 'arn:aws:secretsmanager:ap-northeast-1:832362088330:secret:rds!db-xxxxxxxx'
     
     response = client.get_secret_value(SecretId=secret_arn)
     creds = json.loads(response['SecretString'])
@@ -21,17 +32,26 @@ def lambda_handler(event, context):
     
     cursor = conn.cursor()
     
-    # batch_etl データベース作成
+    # batch_etl データベースが存在するか確認
     cursor.execute("SELECT 1 FROM pg_database WHERE datname='batch_etl'")
-    if not cursor.fetchone():
-        conn.autocommit = True
-        cursor.execute("CREATE DATABASE batch_etl")
-        conn.autocommit = False
+    db_exists = cursor.fetchone()
     
-    cursor.close()
+    if not db_exists:
+        # CREATE DATABASE はトランザクション外で実行
+        cursor.close()
+        conn.autocommit = True
+        cursor = conn.cursor()
+        cursor.execute("CREATE DATABASE batch_etl")
+        cursor.close()
+        conn.autocommit = False
+        print("Database batch_etl created")
+    else:
+        cursor.close()
+        print("Database batch_etl already exists")
+    
     conn.close()
     
-    # batch_etl に接続し直す
+    # batch_etl データベースに接続し直す
     conn = pg8000.connect(
         host=creds['host'],
         database='batch_etl',
