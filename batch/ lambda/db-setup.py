@@ -20,7 +20,7 @@ def lambda_handler(event, context):
     # batch_etl データベースに接続
     conn = pg8000.connect(
         host=creds['host'],
-        database='batch_etl',
+        database=creds['dbname'],
         user=creds['username'],
         password=creds['password'],
         port=int(creds['port'])
