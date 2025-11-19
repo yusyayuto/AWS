@@ -1,138 +1,168 @@
 ┌─────────────────────────────────────────────────────────────────┐
-│               ETL ジョブ実行フロー (job_category 別)               │
+│                   待機時間とは?                                    │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│ 定義:                                                            │
+│   ジョブが Submit されてから Running になるまでの時間             │
+│                                                                 │
+│ AWS Batch のジョブライフサイクル:                                 │
+│                                                                 │
+│   SUBMITTED → PENDING → RUNNABLE → STARTING → RUNNING           │
+│   ↑                                               ↑             │
+│   │←────────── 待機時間 (Wait Time) ──────────────→│            │
+│   │                                               │             │
+│   createdAt                                    startedAt        │
+│   (投入時刻)                                   (開始時刻)        │
+│                                                                 │
+│ Lambda の場合:                                                   │
+│   Invoke → 即座に実行                                            │
+│   → 待機時間 ≈ 0 秒 (コールドスタート時間は除く)                  │
+│                                                                 │
 └─────────────────────────────────────────────────────────────────┘
 
 
-【AWS Batch の場合】
+┌─────────────────────────────────────────────────────────────────┐
+│              JobWaitTime 測定の仕組み (AWS Batch)                 │
+└─────────────────────────────────────────────────────────────────┘
 
-EventBridge Scheduler (3つ)
-┌──────────────────┐  ┌──────────────────┐  ┌──────────────────┐
-│ Scheduler        │  │ Scheduler        │  │ Scheduler        │
-│ (critical)       │  │ (normal)         │  │ (low)            │
-│                  │  │                  │  │                  │
-│ cron: 02:00 UTC  │  │ cron: 02:10 UTC  │  │ cron: 02:20 UTC  │
-└────────┬─────────┘  └────────┬─────────┘  └────────┬─────────┘
-         │                     │                     │
-         │ Submit Job          │ Submit Job          │ Submit Job
-         │                     │                     │
-         ↓                     ↓                     ↓
-┌──────────────────┐  ┌──────────────────┐  ┌──────────────────┐
-│ Job Definition   │  │ Job Definition   │  │ Job Definition   │
-│ (critical)       │  │ (normal)         │  │ (low)            │
-│                  │  │                  │  │                  │
-│ 環境変数:         │  │ 環境変数:         │  │ 環境変数:         │
-│ JOB_CATEGORY=    │  │ JOB_CATEGORY=    │  │ JOB_CATEGORY=    │
-│   critical       │  │   normal         │  │   low            │
-└────────┬─────────┘  └────────┬─────────┘  └────────┬─────────┘
-         │                     │                     │
-         └──────────────┬──────┴──────────┬──────────┘
-                        │                 │
-                        ↓                 ↓
-              ┌──────────────────┐  ┌──────────────────┐
-              │ 同じ Job Queue   │  │ 同じ Compute Env │
-              │ (batch-job-queue)│  │ (batch-compute-  │
-              │                  │  │  env)            │
-              └──────────────────┘  └──────────────────┘
-                        │
-                        ↓
-              ┌──────────────────┐
-              │ Fargate Container│
-              │                  │
-              │ etl_job.py       │
-              │ 実行              │
-              └────────┬─────────┘
-                       │
-                       ↓ JSON ログ出力
-              ┌──────────────────────────────────┐
-              │ CloudWatch Logs                  │
-              │ /aws/batch/job/...               │
-              │                                  │
-              │ critical ジョブのログ:            │
-              │ {                                │
-              │   "job_category": "critical",    │
-              │   "status": "SUCCEEDED",         │
-              │   "execution_env": "batch"       │
-              │ }                                │
-              │                                  │
-              │ normal ジョブのログ:              │
-              │ {                                │
-              │   "job_category": "normal",      │
-              │   "status": "SUCCEEDED",         │
-              │   "execution_env": "batch"       │
-              │ }                                │
-              │                                  │
-              │ low ジョブのログ:                 │
-              │ {                                │
-              │   "job_category": "low",         │
-              │   "status": "FAILED",            │
-              │   "execution_env": "batch"       │
-              │ }                                │
-              └────────┬─────────────────────────┘
-                       │
-         ┌─────────────┼─────────────┬─────────────────┐
-         │             │             │                 │
-         ↓             ↓             ↓                 ↓
-┌───────────────┐ ┌───────────────┐ ┌───────────────┐ ┌───────────────┐
-│Metrics Filter │ │Metrics Filter │ │Metrics Filter │ │Metrics Filter │
-│               │ │               │ │               │ │               │
-│JobSucceeded   │ │JobSucceeded   │ │JobSucceeded   │ │JobFailed      │
-│-batch-critical│ │-batch-normal  │ │-batch-low     │ │-batch-critical│
-│               │ │               │ │               │ │               │
-│パターン:       │ │パターン:       │ │パターン:       │ │パターン:       │
-│{ $.job_       │ │{ $.job_       │ │{ $.job_       │ │{ $.job_       │
-│  category =   │ │  category =   │ │  category =   │ │  category =   │
-│  "critical" &&│ │  "normal" &&  │ │  "low" &&     │ │  "critical" &&│
-│  $.status =   │ │  $.status =   │ │  $.status =   │ │  $.status =   │
-│  "SUCCEEDED" }│ │  "SUCCEEDED" }│ │  "SUCCEEDED" }│ │  "FAILED" }   │
-└───────┬───────┘ └───────┬───────┘ └───────┬───────┘ └───────┬───────┘
-        │                 │                 │                 │
-        └─────────────────┼─────────────────┼─────────────────┘
-                          ↓                 ↓
-                ┌──────────────────┐  ┌──────────────────┐
-                │ CloudWatch       │  │ 同様に            │
-                │ Metrics          │  │ normal, low も   │
-                │                  │  │ 作成              │
-                │ Namespace:       │  └──────────────────┘
-                │ sasaki-batchtest │
-                │                  │
-                │ メトリクス:       │
-                │ ・JobSucceeded-batch-critical  │
-                │ ・JobFailed-batch-critical     │
-                │ ・JobSucceeded-batch-normal    │
-                │ ・JobFailed-batch-normal       │
-                │ ・JobSucceeded-batch-low       │
-                │ ・JobFailed-batch-low          │
-                └────────┬─────────┘
-                         ↓
-                ┌──────────────────────────────────┐
-                │ CloudWatch Dashboard             │
-                │                                  │
-                │ ウィジェット1: critical 成功率     │
-                │ ───────────────────────────────  │
-                │ 計算式:                           │
-                │ IF((m1+m2)==0, 100,              │
-                │    100*m1/(m1+m2))               │
-                │                                  │
-                │ m1 = JobSucceeded-batch-critical │
-                │ m2 = JobFailed-batch-critical    │
-                │                                  │
-                │ 水平線: 99.5% (SLO目標)           │
-                │ ───────────────────────────────  │
-                │                                  │
-                │ ウィジェット2: normal 成功率       │
-                │ ───────────────────────────────  │
-                │ 同様の計算式                      │
-                │ m1 = JobSucceeded-batch-normal   │
-                │ m2 = JobFailed-batch-normal      │
-                │                                  │
-                │ 水平線: 95% (SLO目標)             │
-                │ ───────────────────────────────  │
-                │                                  │
-                │ ウィジェット3: low 成功率          │
-                │ ───────────────────────────────  │
-                │ 同様の計算式                      │
-                │ m1 = JobSucceeded-batch-low      │
-                │ m2 = JobFailed-batch-low         │
-                │                                  │
-                │ 水平線: なし (ベストエフォート)    │
-                └──────────────────────────────────┘
+【ステップ1: ジョブ投入】
+
+  02:00:00  EventBridge Scheduler
+              ↓ Submit Job
+            ┌──────────────────┐
+            │ AWS Batch        │
+            │ Job Queue        │
+            └────────┬─────────┘
+                     │
+                     ↓ SUBMITTED 状態
+            ┌──────────────────┐
+            │ Job              │
+            │ Status: SUBMITTED│
+            │ createdAt:       │
+            │  1700000000000   │ ← タイムスタンプ (ミリ秒)
+            └────────┬─────────┘
+                     │
+                     │ State Change Event
+                     ↓
+            ┌──────────────────────────────┐
+            │ EventBridge                  │
+            │                              │
+            │ Event Detail:                │
+            │ {                            │
+            │   "status": "SUBMITTED",     │
+            │   "jobId": "job-123",        │
+            │   "createdAt": 1700000000000,│
+            │   "startedAt": null          │
+            │ }                            │
+            └────────┬─────────────────────┘
+                     │
+                     ↓ Invoke Lambda
+            ┌──────────────────────────────┐
+            │ Lambda                       │
+            │ (batch-job-metrics-          │
+            │  collector)                  │
+            │                              │
+            │ 処理:                         │
+            │   SUBMITTED イベントは無視    │
+            │   (createdAt を記録しない)   │
+            └──────────────────────────────┘
+
+
+【ステップ2: ジョブ開始】
+
+  02:00:45  ┌──────────────────┐
+            │ Job              │
+            │ Status: RUNNING  │
+            │ createdAt:       │
+            │  1700000000000   │ ← 投入時刻
+            │ startedAt:       │
+            │  1700000045000   │ ← 開始時刻
+            └────────┬─────────┘
+                     │
+                     │ State Change Event
+                     ↓
+            ┌──────────────────────────────┐
+            │ EventBridge                  │
+            │                              │
+            │ Event Detail:                │
+            │ {                            │
+            │   "status": "RUNNING",       │
+            │   "jobId": "job-123",        │
+            │   "jobName": "scheduled-job- │
+            │              critical-...",  │
+            │   "createdAt": 1700000000000,│ ← 両方含まれる!
+            │   "startedAt": 1700000045000 │
+            │ }                            │
+            └────────┬─────────────────────┘
+                     │
+                     ↓ Invoke Lambda
+            ┌──────────────────────────────┐
+            │ Lambda                       │
+            │ (batch-job-metrics-          │
+            │  collector)                  │
+            │                              │
+            │ 処理:                         │
+            │                              │
+            │ 1. job_name から category    │
+            │    を抽出:                    │
+            │    "critical"                │
+            │                              │
+            │ 2. 待機時間を計算:            │
+            │    wait_time =               │
+            │    (startedAt - createdAt)   │
+            │    / 1000                    │
+            │                              │
+            │    = (1700000045000 -        │
+            │       1700000000000) / 1000  │
+            │    = 45秒                    │
+            │                              │
+            │ 3. CloudWatch Metrics に送信:│
+            │                              │
+            │    cloudwatch.put_metric_    │
+            │    data(                     │
+            │      Namespace:              │
+            │        'sasaki-batchtest',   │
+            │      MetricData: [{          │
+            │        MetricName:           │
+            │          'JobWaitTime-batch- │
+            │           critical',         │
+            │        Value: 45.0,          │
+            │        Unit: 'Seconds'       │
+            │      }]                      │
+            │    )                         │
+            └────────┬─────────────────────┘
+                     │
+                     ↓ put_metric_data
+            ┌──────────────────────────────┐
+            │ CloudWatch Metrics           │
+            │                              │
+            │ Namespace: sasaki-batchtest  │
+            │                              │
+            │ メトリクス:                   │
+            │   JobWaitTime-batch-critical │
+            │   Value: 45.0 秒             │
+            │   Timestamp: 02:00:45        │
+            └──────────────────────────────┘
+
+
+【ステップ3: Dashboard で可視化】
+
+  CloudWatch Dashboard
+  ┌────────────────────────────────────────┐
+  │ 待機時間 P95 (critical)                 │
+  ├────────────────────────────────────────┤
+  │                                        │ 60秒 ← SLO目標
+  │             ╱───╲                      │
+  │           ╱       ╲                    │
+  │         ╱           ╲                  │ 45秒
+  │       ╱               ╲                │
+  │     ╱                   ╲              │
+  ├────────────────────────────────────────┤
+  │ 02:00  03:00  04:00  05:00  06:00     │
+  └────────────────────────────────────────┘
+  
+  メトリクス設定:
+    - JobWaitTime-batch-critical
+    - Statistic: p95 (95パーセンタイル)
+    - Period: 5分
+    - 水平線: 60秒 (1分)
