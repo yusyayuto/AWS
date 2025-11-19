@@ -1,0 +1,40 @@
+{
+  "Comment": "Lambda ETL job with wait time measurement",
+  "StartAt": "RecordScheduledTime",
+  "States": {
+    "RecordScheduledTime": {
+      "Type": "Pass",
+      "Comment": "Record the scheduled execution time",
+      "Parameters": {
+        "scheduled_time.$": "$$.State.EnteredTime",
+        "job_category.$": "$.job_category"
+      },
+      "Next": "InvokeLambda"
+    },
+    "InvokeLambda": {
+      "Type": "Task",
+      "Comment": "Invoke Lambda function with scheduled time",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "batch-etl-lambda",
+        "Payload": {
+          "scheduled_time.$": "$.scheduled_time",
+          "job_category.$": "$.job_category"
+        }
+      },
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 2,
+          "BackoffRate": 2
+        }
+      ],
+      "End": true
+    }
+  }
+}
