@@ -1,1 +1,0 @@
-Get-Content -Raw "sandbox:/mnt/data/japan-holidays-2025-2030-google-like-trimmed.ics"
