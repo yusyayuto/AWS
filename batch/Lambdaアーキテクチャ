@@ -1,138 +1,70 @@
-┌─────────────────────────────────────────────────────────────────┐
-│               ETL ジョブ実行フロー (job_category 別)               │
-└─────────────────────────────────────────────────────────────────┘
-
-
-【AWS Batch の場合】
-
 EventBridge Scheduler (3つ)
 ┌──────────────────┐  ┌──────────────────┐  ┌──────────────────┐
 │ Scheduler        │  │ Scheduler        │  │ Scheduler        │
 │ (critical)       │  │ (normal)         │  │ (low)            │
-│                  │  │                  │  │                  │
-│ cron: 02:00 UTC  │  │ cron: 02:10 UTC  │  │ cron: 02:20 UTC  │
 └────────┬─────────┘  └────────┬─────────┘  └────────┬─────────┘
          │                     │                     │
-         │ Submit Job          │ Submit Job          │ Submit Job
+         │ Invoke              │ Invoke              │ Invoke
          │                     │                     │
-         ↓                     ↓                     ↓
-┌──────────────────┐  ┌──────────────────┐  ┌──────────────────┐
-│ Job Definition   │  │ Job Definition   │  │ Job Definition   │
-│ (critical)       │  │ (normal)         │  │ (low)            │
-│                  │  │                  │  │                  │
-│ 環境変数:         │  │ 環境変数:         │  │ 環境変数:         │
-│ JOB_CATEGORY=    │  │ JOB_CATEGORY=    │  │ JOB_CATEGORY=    │
-│   critical       │  │   normal         │  │   low            │
-└────────┬─────────┘  └────────┬─────────┘  └────────┬─────────┘
+         │ Payload:            │ Payload:            │ Payload:
+         │ {                   │ {                   │ {
+         │  "job_category":    │  "job_category":    │  "job_category":
+         │   "critical"        │   "normal"          │   "low"
+         │ }                   │ }                   │ }
          │                     │                     │
          └──────────────┬──────┴──────────┬──────────┘
                         │                 │
                         ↓                 ↓
               ┌──────────────────┐  ┌──────────────────┐
-              │ 同じ Job Queue   │  │ 同じ Compute Env │
-              │ (batch-job-queue)│  │ (batch-compute-  │
-              │                  │  │  env)            │
-              └──────────────────┘  └──────────────────┘
-                        │
-                        ↓
-              ┌──────────────────┐
-              │ Fargate Container│
-              │                  │
-              │ etl_job.py       │
-              │ 実行              │
-              └────────┬─────────┘
+              │ 同じ Lambda 関数  │  │ 環境変数を        │
+              │ (batch-etl-      │  │ event で上書き   │
+              │  lambda)         │  │                  │
+              └────────┬─────────┘  └──────────────────┘
                        │
                        ↓ JSON ログ出力
               ┌──────────────────────────────────┐
               │ CloudWatch Logs                  │
-              │ /aws/batch/job/...               │
+              │ /aws/lambda/batch-etl-lambda     │
               │                                  │
               │ critical ジョブのログ:            │
               │ {                                │
               │   "job_category": "critical",    │
               │   "status": "SUCCEEDED",         │
-              │   "execution_env": "batch"       │
+              │   "execution_env": "lambda"      │
               │ }                                │
               │                                  │
               │ normal ジョブのログ:              │
               │ {                                │
               │   "job_category": "normal",      │
               │   "status": "SUCCEEDED",         │
-              │   "execution_env": "batch"       │
+              │   "execution_env": "lambda"      │
               │ }                                │
               │                                  │
               │ low ジョブのログ:                 │
               │ {                                │
               │   "job_category": "low",         │
               │   "status": "FAILED",            │
-              │   "execution_env": "batch"       │
+              │   "execution_env": "lambda"      │
               │ }                                │
               └────────┬─────────────────────────┘
                        │
-         ┌─────────────┼─────────────┬─────────────────┐
-         │             │             │                 │
-         ↓             ↓             ↓                 ↓
-┌───────────────┐ ┌───────────────┐ ┌───────────────┐ ┌───────────────┐
-│Metrics Filter │ │Metrics Filter │ │Metrics Filter │ │Metrics Filter │
-│               │ │               │ │               │ │               │
-│JobSucceeded   │ │JobSucceeded   │ │JobSucceeded   │ │JobFailed      │
-│-batch-critical│ │-batch-normal  │ │-batch-low     │ │-batch-critical│
-│               │ │               │ │               │ │               │
-│パターン:       │ │パターン:       │ │パターン:       │ │パターン:       │
-│{ $.job_       │ │{ $.job_       │ │{ $.job_       │ │{ $.job_       │
-│  category =   │ │  category =   │ │  category =   │ │  category =   │
-│  "critical" &&│ │  "normal" &&  │ │  "low" &&     │ │  "critical" &&│
-│  $.status =   │ │  $.status =   │ │  $.status =   │ │  $.status =   │
-│  "SUCCEEDED" }│ │  "SUCCEEDED" }│ │  "SUCCEEDED" }│ │  "FAILED" }   │
-└───────┬───────┘ └───────┬───────┘ └───────┬───────┘ └───────┬───────┘
-        │                 │                 │                 │
-        └─────────────────┼─────────────────┼─────────────────┘
-                          ↓                 ↓
-                ┌──────────────────┐  ┌──────────────────┐
-                │ CloudWatch       │  │ 同様に            │
-                │ Metrics          │  │ normal, low も   │
-                │                  │  │ 作成              │
-                │ Namespace:       │  └──────────────────┘
-                │ sasaki-batchtest │
-                │                  │
-                │ メトリクス:       │
-                │ ・JobSucceeded-batch-critical  │
-                │ ・JobFailed-batch-critical     │
-                │ ・JobSucceeded-batch-normal    │
-                │ ・JobFailed-batch-normal       │
-                │ ・JobSucceeded-batch-low       │
-                │ ・JobFailed-batch-low          │
-                └────────┬─────────┘
-                         ↓
-                ┌──────────────────────────────────┐
-                │ CloudWatch Dashboard             │
-                │                                  │
-                │ ウィジェット1: critical 成功率     │
-                │ ───────────────────────────────  │
-                │ 計算式:                           │
-                │ IF((m1+m2)==0, 100,              │
-                │    100*m1/(m1+m2))               │
-                │                                  │
-                │ m1 = JobSucceeded-batch-critical │
-                │ m2 = JobFailed-batch-critical    │
-                │                                  │
-                │ 水平線: 99.5% (SLO目標)           │
-                │ ───────────────────────────────  │
-                │                                  │
-                │ ウィジェット2: normal 成功率       │
-                │ ───────────────────────────────  │
-                │ 同様の計算式                      │
-                │ m1 = JobSucceeded-batch-normal   │
-                │ m2 = JobFailed-batch-normal      │
-                │                                  │
-                │ 水平線: 95% (SLO目標)             │
-                │ ───────────────────────────────  │
-                │                                  │
-                │ ウィジェット3: low 成功率          │
-                │ ───────────────────────────────  │
-                │ 同様の計算式                      │
-                │ m1 = JobSucceeded-batch-low      │
-                │ m2 = JobFailed-batch-low         │
-                │                                  │
-                │ 水平線: なし (ベストエフォート)    │
-                └──────────────────────────────────┘
+         ┌─────────────┼─────────────┐
+         │             │             │
+         ↓             ↓             ↓
+┌───────────────┐ ┌───────────────┐ ┌───────────────┐
+│Metrics Filter │ │Metrics Filter │ │Metrics Filter │
+│               │ │               │ │               │
+│JobSucceeded   │ │JobSucceeded   │ │JobSucceeded   │
+│-lambda-       │ │-lambda-       │ │-lambda-       │
+│critical       │ │normal         │ │low            │
+│               │ │               │ │               │
+│パターン:       │ │パターン:       │ │パターン:       │
+│{ $.execution_ │ │{ $.execution_ │ │{ $.execution_ │
+│  env =        │ │  env =        │ │  env =        │
+│  "lambda" &&  │ │  "lambda" &&  │ │  "lambda" &&  │
+│  $.job_       │ │  $.job_       │ │  $.job_       │
+│  category =   │ │  category =   │ │  category =   │
+│  "critical" &&│ │  "normal" &&  │ │  "low" &&     │
+│  $.status =   │ │  $.status =   │ │  $.status =   │
+│  "SUCCEEDED" }│ │  "SUCCEEDED" }│ │  "SUCCEEDED" }│
+└───────────────┘ └───────────────┘ └───────────────┘
