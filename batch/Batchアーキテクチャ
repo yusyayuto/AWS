@@ -1,175 +1,71 @@
 ┌─────────────────────────────────────────────────────────────────┐
-│                  リトライとは?                                     │
+│                 JobCompleted とは?                                │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
 │ 定義:                                                            │
-│   ジョブが失敗して再試行された回数                                 │
+│   完了したジョブの総数 (成功 + 失敗)                              │
 │                                                                 │
-│ AWS Batch のリトライ設定:                                         │
-│   Job Definition で指定:                                         │
-│     "retryStrategy": {                                          │
-│       "attempts": 3  ← 最大3回試行 (初回 + 2回リトライ)          │
-│     }                                                            │
+│ 用途:                                                            │
+│   1. スループットの測定                                           │
+│      → 1分間に何ジョブ完了したか                                  │
 │                                                                 │
-│ リトライの流れ:                                                   │
-│   試行1 (初回) → FAILED                                          │
-│   試行2 (リトライ1回目) → FAILED                                 │
-│   試行3 (リトライ2回目) → SUCCEEDED                              │
-│   → attempts = 3 (リトライあり)                                  │
+│   2. リトライ発生率の分母                                         │
+│      → リトライ数 / 完了数                                       │
 │                                                                 │
-│ リトライなしの場合:                                               │
-│   試行1 (初回) → SUCCEEDED                                       │
-│   → attempts = 1 (リトライなし)                                  │
+│   3. 成功率の分母                                                 │
+│      → 成功数 / (成功数 + 失敗数)                                │
+│      ※JobCompleted = 成功数 + 失敗数                             │
 │                                                                 │
 └─────────────────────────────────────────────────────────────────┘
 
 
 ┌─────────────────────────────────────────────────────────────────┐
-│              JobRetried 測定の仕組み (AWS Batch)                  │
+│            JobCompleted 測定の仕組み (AWS Batch)                  │
 └─────────────────────────────────────────────────────────────────┘
 
-【ケース1: リトライなし (成功)】
+【SUCCEEDED または FAILED の両方をカウント】
 
-  02:00:00  ジョブ開始
-              ↓
   02:05:00  ┌──────────────────┐
-            │ Job              │
+            │ Job 1            │
             │ Status: SUCCEEDED│
-            │ attempts: [      │
-            │   {              │
-            │     "container": │
-            │       {...},     │
-            │     "startedAt": │
-            │       1700000000 │
-            │   }              │
-            │ ]                │ ← 配列の長さ = 1
             └────────┬─────────┘
                      │
-                     │ State Change Event
-                     ↓
+                     ↓ State Change Event
             ┌──────────────────────────────┐
             │ EventBridge                  │
-            │                              │
-            │ Event Detail:                │
             │ {                            │
-            │   "status": "SUCCEEDED",     │
-            │   "jobId": "job-123",        │
-            │   "jobName": "scheduled-job- │
-            │              critical-...",  │
-            │   "attempts": [              │
-            │     {                        │
-            │       "container": {...},    │
-            │       "startedAt": 1700000000│
-            │     }                        │
-            │   ]                          │ ← 長さ1 = リトライなし
+            │   "status": "SUCCEEDED"      │
             │ }                            │
             └────────┬─────────────────────┘
                      │
                      ↓ Invoke Lambda
             ┌──────────────────────────────┐
             │ Lambda                       │
-            │ (batch-job-metrics-          │
-            │  collector)                  │
             │                              │
-            │ 処理:                         │
-            │                              │
-            │ 1. attempts 配列を取得        │
-            │    attempts = event['detail']│
-            │               ['attempts']   │
-            │                              │
-            │ 2. 長さを確認                 │
-            │    attempt_count =           │
-            │      len(attempts)           │
-            │    = 1                       │
-            │                              │
-            │ 3. リトライ判定               │
-            │    is_retry =                │
-            │      1 if attempt_count > 1  │
-            │      else 0                  │
-            │    = 0 (リトライなし)         │
-            │                              │
-            │ 4. CloudWatch Metrics に送信:│
-            │                              │
-            │    cloudwatch.put_metric_    │
-            │    data(                     │
-            │      Namespace:              │
-            │        'sasaki-batchtest',   │
-            │      MetricData: [           │
-            │        {                     │
-            │          MetricName:         │
-            │            'JobRetried-batch-│
-            │             critical',       │
-            │          Value: 0,           │
-            │          Unit: 'Count'       │
-            │        },                    │
-            │        {                     │
-            │          MetricName:         │
-            │            'JobCompleted-    │
-            │             batch-critical', │
-            │          Value: 1,           │
-            │          Unit: 'Count'       │
-            │        }                     │
-            │      ]                       │
-            │    )                         │
-            └────────┬─────────────────────┘
+            │ if status in ['SUCCEEDED',   │
+            │               'FAILED']:     │
+            │   put_metric(                │
+            │     'JobCompleted', 1        │
+            │   )                          │
+            └──────────────────────────────┘
                      │
                      ↓
             ┌──────────────────────────────┐
             │ CloudWatch Metrics           │
-            │                              │
-            │ JobRetried-batch-critical: 0 │
-            │ JobCompleted-batch-critical:1│
+            │ JobCompleted: +1             │
             └──────────────────────────────┘
-
-
-【ケース2: リトライあり (2回失敗後に成功)】
-
-  02:00:00  試行1 (初回) → FAILED
-              ↓
-  02:05:00  試行2 (リトライ1回目) → FAILED
-              ↓
-  02:10:00  試行3 (リトライ2回目) → SUCCEEDED
-              ↓
-            ┌──────────────────┐
-            │ Job              │
-            │ Status: SUCCEEDED│
-            │ attempts: [      │
-            │   {              │
-            │     "container": │
-            │       {...},     │
-            │     "startedAt": │
-            │       1700000000,│
-            │     "statusReason│
-            │       ": "Error" │
-            │   },             │
-            │   {              │
-            │     "container": │
-            │       {...},     │
-            │     "startedAt": │
-            │       1700000300,│
-            │     "statusReason│
-            │       ": "Error" │
-            │   },             │
-            │   {              │
-            │     "container": │
-            │       {...},     │
-            │     "startedAt": │
-            │       1700000600 │
-            │   }              │
-            │ ]                │ ← 配列の長さ = 3
+  
+  
+  02:10:00  ┌──────────────────┐
+            │ Job 2            │
+            │ Status: FAILED   │
             └────────┬─────────┘
                      │
-                     │ State Change Event
-                     ↓
+                     ↓ State Change Event
             ┌──────────────────────────────┐
             │ EventBridge                  │
-            │                              │
-            │ Event Detail:                │
             │ {                            │
-            │   "status": "SUCCEEDED",     │
-            │   "attempts": [              │
-            │     {...}, {...}, {...}      │
-            │   ]                          │ ← 長さ3 = リトライあり
+            │   "status": "FAILED"         │
             │ }                            │
             └────────┬─────────────────────┘
                      │
@@ -177,56 +73,62 @@
             ┌──────────────────────────────┐
             │ Lambda                       │
             │                              │
-            │ 処理:                         │
-            │                              │
-            │ 1. attempts 配列を取得        │
-            │    attempt_count =           │
-            │      len(attempts)           │
-            │    = 3                       │
-            │                              │
-            │ 2. リトライ判定               │
-            │    is_retry =                │
-            │      1 if attempt_count > 1  │
-            │      else 0                  │
-            │    = 1 (リトライあり)         │
-            │                              │
-            │ 3. メトリクス送信             │
-            │    JobRetried: 1             │
-            │    JobCompleted: 1           │
+            │ if status in ['SUCCEEDED',   │
+            │               'FAILED']:     │
+            │   put_metric(                │
+            │     'JobCompleted', 1        │
+            │   )                          │
             └──────────────────────────────┘
+                     │
+                     ↓
+            ┌──────────────────────────────┐
+            │ CloudWatch Metrics           │
+            │ JobCompleted: +1             │ ← 失敗もカウント
+            └──────────────────────────────┘
+
+
+【時系列でのカウント】
+
+  時間軸
+    ↓
+  02:00  ジョブ1 SUCCEEDED → JobCompleted: 1
+    │
+  02:05  ジョブ2 SUCCEEDED → JobCompleted: 1
+    │
+  02:10  ジョブ3 FAILED    → JobCompleted: 1
+    │
+  02:15  ジョブ4 SUCCEEDED → JobCompleted: 1
+    │
+  02:20  ジョブ5 SUCCEEDED → JobCompleted: 1
+    │
+    ↓
+  
+  集計 (Sum, 5分間):
+    02:00-02:05  JobCompleted: 2
+    02:05-02:10  JobCompleted: 1
+    02:10-02:15  JobCompleted: 1
+    02:15-02:20  JobCompleted: 1
 
 
 【Dashboard での可視化】
 
-  リトライ発生率の計算:
+  スループット (完了ジョブ数/分):
   
   ┌────────────────────────────────────────┐
-  │ リトライ発生率 = (リトライ数 / 完了数)  │
-  │                × 100                   │
-  └────────────────────────────────────────┘
-  
-  CloudWatch Math Expression:
-    m1 = JobRetried-batch-critical (Sum, 5分)
-    m2 = JobCompleted-batch-critical (Sum, 5分)
-    
-    e1 = IF(m2 == 0, 0, 100 * m1 / m2)
-  
-  例:
-    1時間で 100ジョブ完了
-    そのうち 5ジョブでリトライ発生
-    
-    リトライ発生率 = 5 / 100 × 100 = 5%
-  
-  グラフ表示:
-  ┌────────────────────────────────────────┐
-  │ リトライ発生率 (critical)               │ 5%
+  │ スループット (critical)                 │
   ├────────────────────────────────────────┤
-  │                                        │
-  │                     ╱────╲            │ 3%
-  │                   ╱        ╲          │
-  │                 ╱            ╲        │
-  │       ────────╱                ╲───   │ 1% ← SLO目標
-  │                                        │
-  ├────────────────────────────────────────┤ 0%
+  │                                        │ 150
+  │             ╱────╲                     │
+  │           ╱        ╲                   │
+  │         ╱            ╲                 │ 100 ← SLO目標
+  │       ╱                ╲               │
+  │     ╱                    ╲             │
+  ├────────────────────────────────────────┤ 50
   │ 02:00  03:00  04:00  05:00  06:00     │
   └────────────────────────────────────────┘
+  
+  メトリクス設定:
+    - JobCompleted-batch-critical
+    - Statistic: Sum
+    - Period: 1分
+    - 単位: Count
