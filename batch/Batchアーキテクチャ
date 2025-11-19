@@ -1,45 +1,48 @@
 ┌─────────────────────────────────────────────────────────────────┐
-│                   待機時間とは?                                    │
+│                  リトライとは?                                     │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
 │ 定義:                                                            │
-│   ジョブが Submit されてから Running になるまでの時間             │
+│   ジョブが失敗して再試行された回数                                 │
 │                                                                 │
-│ AWS Batch のジョブライフサイクル:                                 │
+│ AWS Batch のリトライ設定:                                         │
+│   Job Definition で指定:                                         │
+│     "retryStrategy": {                                          │
+│       "attempts": 3  ← 最大3回試行 (初回 + 2回リトライ)          │
+│     }                                                            │
 │                                                                 │
-│   SUBMITTED → PENDING → RUNNABLE → STARTING → RUNNING           │
-│   ↑                                               ↑             │
-│   │←────────── 待機時間 (Wait Time) ──────────────→│            │
-│   │                                               │             │
-│   createdAt                                    startedAt        │
-│   (投入時刻)                                   (開始時刻)        │
+│ リトライの流れ:                                                   │
+│   試行1 (初回) → FAILED                                          │
+│   試行2 (リトライ1回目) → FAILED                                 │
+│   試行3 (リトライ2回目) → SUCCEEDED                              │
+│   → attempts = 3 (リトライあり)                                  │
 │                                                                 │
-│ Lambda の場合:                                                   │
-│   Invoke → 即座に実行                                            │
-│   → 待機時間 ≈ 0 秒 (コールドスタート時間は除く)                  │
+│ リトライなしの場合:                                               │
+│   試行1 (初回) → SUCCEEDED                                       │
+│   → attempts = 1 (リトライなし)                                  │
 │                                                                 │
 └─────────────────────────────────────────────────────────────────┘
 
 
 ┌─────────────────────────────────────────────────────────────────┐
-│              JobWaitTime 測定の仕組み (AWS Batch)                 │
+│              JobRetried 測定の仕組み (AWS Batch)                  │
 └─────────────────────────────────────────────────────────────────┘
 
-【ステップ1: ジョブ投入】
+【ケース1: リトライなし (成功)】
 
-  02:00:00  EventBridge Scheduler
-              ↓ Submit Job
-            ┌──────────────────┐
-            │ AWS Batch        │
-            │ Job Queue        │
-            └────────┬─────────┘
-                     │
-                     ↓ SUBMITTED 状態
-            ┌──────────────────┐
+  02:00:00  ジョブ開始
+              ↓
+  02:05:00  ┌──────────────────┐
             │ Job              │
-            │ Status: SUBMITTED│
-            │ createdAt:       │
-            │  1700000000000   │ ← タイムスタンプ (ミリ秒)
+            │ Status: SUCCEEDED│
+            │ attempts: [      │
+            │   {              │
+            │     "container": │
+            │       {...},     │
+            │     "startedAt": │
+            │       1700000000 │
+            │   }              │
+            │ ]                │ ← 配列の長さ = 1
             └────────┬─────────┘
                      │
                      │ State Change Event
@@ -49,49 +52,16 @@
             │                              │
             │ Event Detail:                │
             │ {                            │
-            │   "status": "SUBMITTED",     │
-            │   "jobId": "job-123",        │
-            │   "createdAt": 1700000000000,│
-            │   "startedAt": null          │
-            │ }                            │
-            └────────┬─────────────────────┘
-                     │
-                     ↓ Invoke Lambda
-            ┌──────────────────────────────┐
-            │ Lambda                       │
-            │ (batch-job-metrics-          │
-            │  collector)                  │
-            │                              │
-            │ 処理:                         │
-            │   SUBMITTED イベントは無視    │
-            │   (createdAt を記録しない)   │
-            └──────────────────────────────┘
-
-
-【ステップ2: ジョブ開始】
-
-  02:00:45  ┌──────────────────┐
-            │ Job              │
-            │ Status: RUNNING  │
-            │ createdAt:       │
-            │  1700000000000   │ ← 投入時刻
-            │ startedAt:       │
-            │  1700000045000   │ ← 開始時刻
-            └────────┬─────────┘
-                     │
-                     │ State Change Event
-                     ↓
-            ┌──────────────────────────────┐
-            │ EventBridge                  │
-            │                              │
-            │ Event Detail:                │
-            │ {                            │
-            │   "status": "RUNNING",       │
+            │   "status": "SUCCEEDED",     │
             │   "jobId": "job-123",        │
             │   "jobName": "scheduled-job- │
             │              critical-...",  │
-            │   "createdAt": 1700000000000,│ ← 両方含まれる!
-            │   "startedAt": 1700000045000 │
+            │   "attempts": [              │
+            │     {                        │
+            │       "container": {...},    │
+            │       "startedAt": 1700000000│
+            │     }                        │
+            │   ]                          │ ← 長さ1 = リトライなし
             │ }                            │
             └────────┬─────────────────────┘
                      │
@@ -103,66 +73,160 @@
             │                              │
             │ 処理:                         │
             │                              │
-            │ 1. job_name から category    │
-            │    を抽出:                    │
-            │    "critical"                │
+            │ 1. attempts 配列を取得        │
+            │    attempts = event['detail']│
+            │               ['attempts']   │
             │                              │
-            │ 2. 待機時間を計算:            │
-            │    wait_time =               │
-            │    (startedAt - createdAt)   │
-            │    / 1000                    │
+            │ 2. 長さを確認                 │
+            │    attempt_count =           │
+            │      len(attempts)           │
+            │    = 1                       │
             │                              │
-            │    = (1700000045000 -        │
-            │       1700000000000) / 1000  │
-            │    = 45秒                    │
+            │ 3. リトライ判定               │
+            │    is_retry =                │
+            │      1 if attempt_count > 1  │
+            │      else 0                  │
+            │    = 0 (リトライなし)         │
             │                              │
-            │ 3. CloudWatch Metrics に送信:│
+            │ 4. CloudWatch Metrics に送信:│
             │                              │
             │    cloudwatch.put_metric_    │
             │    data(                     │
             │      Namespace:              │
             │        'sasaki-batchtest',   │
-            │      MetricData: [{          │
-            │        MetricName:           │
-            │          'JobWaitTime-batch- │
-            │           critical',         │
-            │        Value: 45.0,          │
-            │        Unit: 'Seconds'       │
-            │      }]                      │
+            │      MetricData: [           │
+            │        {                     │
+            │          MetricName:         │
+            │            'JobRetried-batch-│
+            │             critical',       │
+            │          Value: 0,           │
+            │          Unit: 'Count'       │
+            │        },                    │
+            │        {                     │
+            │          MetricName:         │
+            │            'JobCompleted-    │
+            │             batch-critical', │
+            │          Value: 1,           │
+            │          Unit: 'Count'       │
+            │        }                     │
+            │      ]                       │
             │    )                         │
             └────────┬─────────────────────┘
                      │
-                     ↓ put_metric_data
+                     ↓
             ┌──────────────────────────────┐
             │ CloudWatch Metrics           │
             │                              │
-            │ Namespace: sasaki-batchtest  │
-            │                              │
-            │ メトリクス:                   │
-            │   JobWaitTime-batch-critical │
-            │   Value: 45.0 秒             │
-            │   Timestamp: 02:00:45        │
+            │ JobRetried-batch-critical: 0 │
+            │ JobCompleted-batch-critical:1│
             └──────────────────────────────┘
 
 
-【ステップ3: Dashboard で可視化】
+【ケース2: リトライあり (2回失敗後に成功)】
 
-  CloudWatch Dashboard
+  02:00:00  試行1 (初回) → FAILED
+              ↓
+  02:05:00  試行2 (リトライ1回目) → FAILED
+              ↓
+  02:10:00  試行3 (リトライ2回目) → SUCCEEDED
+              ↓
+            ┌──────────────────┐
+            │ Job              │
+            │ Status: SUCCEEDED│
+            │ attempts: [      │
+            │   {              │
+            │     "container": │
+            │       {...},     │
+            │     "startedAt": │
+            │       1700000000,│
+            │     "statusReason│
+            │       ": "Error" │
+            │   },             │
+            │   {              │
+            │     "container": │
+            │       {...},     │
+            │     "startedAt": │
+            │       1700000300,│
+            │     "statusReason│
+            │       ": "Error" │
+            │   },             │
+            │   {              │
+            │     "container": │
+            │       {...},     │
+            │     "startedAt": │
+            │       1700000600 │
+            │   }              │
+            │ ]                │ ← 配列の長さ = 3
+            └────────┬─────────┘
+                     │
+                     │ State Change Event
+                     ↓
+            ┌──────────────────────────────┐
+            │ EventBridge                  │
+            │                              │
+            │ Event Detail:                │
+            │ {                            │
+            │   "status": "SUCCEEDED",     │
+            │   "attempts": [              │
+            │     {...}, {...}, {...}      │
+            │   ]                          │ ← 長さ3 = リトライあり
+            │ }                            │
+            └────────┬─────────────────────┘
+                     │
+                     ↓ Invoke Lambda
+            ┌──────────────────────────────┐
+            │ Lambda                       │
+            │                              │
+            │ 処理:                         │
+            │                              │
+            │ 1. attempts 配列を取得        │
+            │    attempt_count =           │
+            │      len(attempts)           │
+            │    = 3                       │
+            │                              │
+            │ 2. リトライ判定               │
+            │    is_retry =                │
+            │      1 if attempt_count > 1  │
+            │      else 0                  │
+            │    = 1 (リトライあり)         │
+            │                              │
+            │ 3. メトリクス送信             │
+            │    JobRetried: 1             │
+            │    JobCompleted: 1           │
+            └──────────────────────────────┘
+
+
+【Dashboard での可視化】
+
+  リトライ発生率の計算:
+  
   ┌────────────────────────────────────────┐
-  │ 待機時間 P95 (critical)                 │
-  ├────────────────────────────────────────┤
-  │                                        │ 60秒 ← SLO目標
-  │             ╱───╲                      │
-  │           ╱       ╲                    │
-  │         ╱           ╲                  │ 45秒
-  │       ╱               ╲                │
-  │     ╱                   ╲              │
-  ├────────────────────────────────────────┤
-  │ 02:00  03:00  04:00  05:00  06:00     │
+  │ リトライ発生率 = (リトライ数 / 完了数)  │
+  │                × 100                   │
   └────────────────────────────────────────┘
   
-  メトリクス設定:
-    - JobWaitTime-batch-critical
-    - Statistic: p95 (95パーセンタイル)
-    - Period: 5分
-    - 水平線: 60秒 (1分)
+  CloudWatch Math Expression:
+    m1 = JobRetried-batch-critical (Sum, 5分)
+    m2 = JobCompleted-batch-critical (Sum, 5分)
+    
+    e1 = IF(m2 == 0, 0, 100 * m1 / m2)
+  
+  例:
+    1時間で 100ジョブ完了
+    そのうち 5ジョブでリトライ発生
+    
+    リトライ発生率 = 5 / 100 × 100 = 5%
+  
+  グラフ表示:
+  ┌────────────────────────────────────────┐
+  │ リトライ発生率 (critical)               │ 5%
+  ├────────────────────────────────────────┤
+  │                                        │
+  │                     ╱────╲            │ 3%
+  │                   ╱        ╲          │
+  │                 ╱            ╲        │
+  │       ────────╱                ╲───   │ 1% ← SLO目標
+  │                                        │
+  ├────────────────────────────────────────┤ 0%
+  │ 02:00  03:00  04:00  05:00  06:00     │
+  └────────────────────────────────────────┘
