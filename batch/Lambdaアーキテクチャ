@@ -1,0 +1,107 @@
+┌─────────────────────────────────────────────────────────────────┐
+│                     Lambda バッチ処理基盤                          │
+└─────────────────────────────────────────────────────────────────┘
+
+【定期実行トリガー】
+┌──────────────────┐
+│ EventBridge      │
+│ Scheduler        │  cron(5 2 * * ? *)
+│ (lambda-critical)│  毎日 02:05 UTC
+└────────┬─────────┘
+         │ Invoke (同期実行)
+         │
+         │ Payload:
+         │ {
+         │   "job_category": "critical"
+         │ }
+         ↓
+┌──────────────────────────────┐
+│ Lambda Function              │
+│ (batch-etl-lambda)           │
+│                              │
+│ 環境変数 (デフォルト):         │
+│  JOB_CATEGORY=critical       │
+│  JOB_TYPE=daily-summary      │
+│  DB_SECRET_ARN=arn:...       │
+│                              │
+│ ※event から job_category を   │
+│   取得して環境変数を上書き      │
+└────────┬─────────────────────┘
+         │
+         │ ランタイム: Python 3.12
+         │ メモリ: 1024 MB
+         │ タイムアウト: 15分
+         │
+         ↓
+┌──────────────────────────────┐
+│ Lambda Deployment Package    │
+│ (ZIP)                        │
+│                              │
+│ ・etl_job.py                 │
+│ ・db_connector.py            │
+│ ・psycopg2/                  │
+│ ・boto3/                     │
+└────────┬─────────────────────┘
+         │
+         ├─────────────────────────────┐
+         │                             │
+         ↓                             ↓
+┌──────────────────┐          ┌──────────────────┐
+│ Secrets Manager  │          │ RDS PostgreSQL   │
+│                  │          │                  │
+│ DB接続情報:       │          │ ・orders         │
+│  host            │──────→  │ ・daily_summary  │
+│  username        │          │ ・etl_job_history│
+│  password        │          └──────────────────┘
+└──────────────────┘
+         │
+         ↓ JSON ログ出力
+┌──────────────────────────────┐
+│ CloudWatch Logs              │
+│ /aws/lambda/batch-etl-lambda │
+│                              │
+│ {                            │
+│   "job_category": "critical",│
+│   "status": "SUCCEEDED",     │
+│   "duration": 12.34,         │
+│   "execution_env": "lambda", │
+│   "wait_time": 0,            │
+│   "retry_count": 0           │
+│ }                            │
+└────────┬─────────────────────┘
+         │
+         ├───────────────┬──────────────┬──────────────┐
+         │               │              │              │
+         ↓               ↓              ↓              ↓
+┌──────────────┐ ┌──────────────┐ ┌──────────────┐ ┌──────────────┐
+│Metrics Filter│ │Metrics Filter│ │Metrics Filter│ │Metrics Filter│
+│JobSucceeded  │ │JobFailed     │ │JobDuration   │ │JobWaitTime   │
+│-lambda-      │ │-lambda-      │ │-lambda-      │ │-lambda-      │
+│critical      │ │critical      │ │critical      │ │critical      │
+└──────┬───────┘ └──────┬───────┘ └──────┬───────┘ └──────┬───────┘
+       │                │                │                │
+       └────────────────┼────────────────┼────────────────┘
+                        │                │
+                        ↓                ↓
+              ┌──────────────────┐ ┌──────────────────┐
+              │ CloudWatch       │ │Metrics Filter    │
+              │ Metrics          │ │JobRetried        │
+              │                  │ │JobCompleted      │
+              │ Namespace:       │ │-lambda-critical  │
+              │ sasaki-batchtest │ └────────┬─────────┘
+              └────────┬─────────┘          │
+                       │                    │
+                       └────────────────────┘
+                                  ↓
+                        ┌──────────────────┐
+                        │ CloudWatch       │
+                        │ Dashboard        │
+                        │                  │
+                        │ ・成功率          │
+                        │ ・処理時間 P95    │
+                        │ ・スループット    │
+                        │ ・待機時間 P95    │
+                        │   (常に 0)        │
+                        │ ・リトライ発生率  │
+                        │   (常に 0)        │
+                        └──────────────────┘
