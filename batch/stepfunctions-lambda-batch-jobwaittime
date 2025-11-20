@@ -1,5 +1,5 @@
 {
-  "Comment": "Lambda ETL job with wait time measurement",
+  "Comment": "Lambda ETL job with wait time measurement and retry",
   "StartAt": "RecordScheduledTime",
   "States": {
     "RecordScheduledTime": {
@@ -24,14 +24,10 @@
       },
       "Retry": [
         {
-          "ErrorEquals": [
-            "Lambda.ServiceException",
-            "Lambda.AWSLambdaException",
-            "Lambda.SdkClientException"
-          ],
-          "IntervalSeconds": 2,
+          "ErrorEquals": ["States.ALL"],
+          "IntervalSeconds": 5,
           "MaxAttempts": 2,
-          "BackoffRate": 2
+          "BackoffRate": 1.0
         }
       ],
       "End": true
