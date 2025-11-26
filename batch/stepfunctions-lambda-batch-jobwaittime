@@ -1,36 +1,34 @@
-{
-  "Comment": "Lambda ETL job with wait time measurement and retry",
-  "StartAt": "RecordScheduledTime",
-  "States": {
-    "RecordScheduledTime": {
-      "Type": "Pass",
-      "Comment": "Record the scheduled execution time",
-      "Parameters": {
-        "scheduled_time.$": "$$.State.EnteredTime",
-        "job_category.$": "$.job_category"
-      },
-      "Next": "InvokeLambda"
-    },
-    "InvokeLambda": {
-      "Type": "Task",
-      "Comment": "Invoke Lambda function with scheduled time",
-      "Resource": "arn:aws:states:::lambda:invoke",
-      "Parameters": {
-        "FunctionName": "batch-etl-lambda",
-        "Payload": {
-          "scheduled_time.$": "$.scheduled_time",
-          "job_category.$": "$.job_category"
-        }
-      },
-      "Retry": [
-        {
-          "ErrorEquals": ["States.ALL"],
-          "IntervalSeconds": 5,
-          "MaxAttempts": 2,
-          "BackoffRate": 1.0
-        }
-      ],
-      "End": true
+"OrderSummary": {
+  "Type": "Task",
+  "Resource": "arn:aws:states:::lambda:invoke",
+  "Parameters": {
+    "FunctionName": "batch-etl-lambda",
+    "Payload": {
+      "scheduled_time.$": "$.batch_start_time",
+      "job_type": "order_summary",
+      "job_category.$": "$.job_category",
+      "retry_count.$": "$$.State.RetryCount"
     }
-  }
+  },
+  "Retry": [{
+    "ErrorEquals": ["States.ALL"],
+    "MaxAttempts": 2,
+    "IntervalSeconds": 5
+  }],
+  "Catch": [{
+    "ErrorEquals": ["States.ALL"],
+    "ResultPath": "$.error",
+    "Next": "NotifyFailureOrderSummary"
+  }],
+  "Next": "InventoryUpdate"
+},
+"NotifyFailureOrderSummary": {
+  "Type": "Task",
+  "Resource": "arn:aws:states:::sns:publish",
+  "Parameters": {
+    "TopicArn": "arn:aws:sns:ap-northeast-1:xxx:batch-error-alerts",
+    "Message.$": "$.error",
+    "Subject": "order_summary failed"
+  },
+  "End": true
 }
