@@ -1,42 +1,58 @@
-AWSTemplateFormatVersion: '2010-09-09'
-Description: Sasaki ETL Lambda SLO Alarms (Batch-wide & per Job)
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  ETL Lambda バッチ監視用 CloudWatch アラーム一式
+  - バッチ全体の成功率 SLO
+  - バッチ全体の待機時間 P95 SLO
+  - ジョブ別の処理時間 P95 SLO
+  - （オプション）一定時間ジョブ未実行アラーム
 
 Parameters:
-  SnsTopicArn:
-    Type: String
-    Description: Alarm 通知用 SNS トピックの ARN を入力してください
   Namespace:
     Type: String
     Default: "ETL/Batch"
-    Description: Lambda(EMF) が出力しているメトリクスの Namespace
+    Description: CloudWatch メトリクスの Namespace（デフォルト: ETL/Batch）
+
   JobCategory:
     Type: String
     Default: "critical"
-    Description: JobCategory ディメンション値 (critical / normal / low)
+    Description: JobCategory ディメンション値（現状は critical 固定運用を想定）
+
   ExecutionEnv:
     Type: String
     Default: "lambda"
-    Description: ExecutionEnv ディメンション値 (Lambda 版は lambda 固定)
+    Description: ExecutionEnv ディメンション値（Lambda 版: lambda / AWS Batch 版: awsbatch 等）
+
+  SnsTopicArn:
+    Type: String
+    Description: アラーム通知先 SNS トピックの ARN を指定してください
 
 Resources:
-  # ================================
-  # 1. バッチ全体 Success Rate SLO
-  # ================================
+
+  # ------------------------------------------------------------
+  # 1. バッチ全体の成功率 SLO
+  #    SLO: 成功率 >= 99.5%
+  #    評価: 1分粒度、直近3分のうち2分異常でアラーム
+  # ------------------------------------------------------------
   SasakiEtlLambdaBatchSuccessRateAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
       AlarmName: sasaki-etl-lambda-batch-success-rate-slo
       AlarmDescription: >
-        【SLO監視】ETL Lambda バッチ全体において、直近 5 分間のジョブ成功率が
+        【SLO監視】ETL Lambda バッチ全体において、直近 3 分間のジョブ成功率が
         99.5% を下回った場合に通知します。
-        SLO: 成功率 ≥ 99.5%。
+        SLO: 成功率 >= 99.5%。
+
       ComparisonOperator: LessThanThreshold
       Threshold: 99.5
-      EvaluationPeriods: 5           # 5分間連続で違反したらアラーム
-      DatapointsToAlarm: 5
-      TreatMissingData: notBreaching # 実行が無い時間は SLO 違反とみなさない
+      EvaluationPeriods: 3          # 3データポイントで評価（= 3分）
+      DatapointsToAlarm: 2          # うち 2 回しきい値を下回ったらアラーム
+      TreatMissingData: notBreaching
+      ActionsEnabled: true
+      AlarmActions:
+        - !Ref SnsTopicArn
+
       Metrics:
-        # ---- 成功数（ジョブ別） ----
+        # --- 成功数（ジョブ別） ---
         - Id: m1_order
           MetricStat:
             Metric:
@@ -44,7 +60,7 @@ Resources:
               MetricName: JobSucceeded
               Dimensions:
                 - Name: JobType
-                  Value: "order_summary"
+                  Value: order_summary
                 - Name: JobCategory
                   Value: !Ref JobCategory
                 - Name: ExecutionEnv
@@ -60,7 +76,7 @@ Resources:
               MetricName: JobSucceeded
               Dimensions:
                 - Name: JobType
-                  Value: "inventory_update"
+                  Value: inventory_update
                 - Name: JobCategory
                   Value: !Ref JobCategory
                 - Name: ExecutionEnv
@@ -76,7 +92,7 @@ Resources:
               MetricName: JobSucceeded
               Dimensions:
                 - Name: JobType
-                  Value: "report_generation"
+                  Value: report_generation
                 - Name: JobCategory
                   Value: !Ref JobCategory
                 - Name: ExecutionEnv
@@ -85,7 +101,7 @@ Resources:
             Stat: Sum
           ReturnData: false
 
-        # ---- 失敗数（ジョブ別） ----
+        # --- 失敗数（ジョブ別） ---
         - Id: m2_order
           MetricStat:
             Metric:
@@ -93,7 +109,7 @@ Resources:
               MetricName: JobFailed
               Dimensions:
                 - Name: JobType
-                  Value: "order_summary"
+                  Value: order_summary
                 - Name: JobCategory
                   Value: !Ref JobCategory
                 - Name: ExecutionEnv
@@ -109,7 +125,7 @@ Resources:
               MetricName: JobFailed
               Dimensions:
                 - Name: JobType
-                  Value: "inventory_update"
+                  Value: inventory_update
                 - Name: JobCategory
                   Value: !Ref JobCategory
                 - Name: ExecutionEnv
@@ -125,7 +141,7 @@ Resources:
               MetricName: JobFailed
               Dimensions:
                 - Name: JobType
-                  Value: "report_generation"
+                  Value: report_generation
                 - Name: JobCategory
                   Value: !Ref JobCategory
                 - Name: ExecutionEnv
@@ -134,7 +150,7 @@ Resources:
             Stat: Sum
           ReturnData: false
 
-        # ---- 成功数合計・失敗数合計 ----
+        # --- 成功数・失敗数の合計 ---
         - Id: total_success
           Expression: "FILL(m1_order,0) + FILL(m1_inventory,0) + FILL(m1_report,0)"
           ReturnData: false
@@ -143,33 +159,38 @@ Resources:
           Expression: "FILL(m2_order,0) + FILL(m2_inventory,0) + FILL(m2_report,0)"
           ReturnData: false
 
-        # ---- 成功率(%) ----
+        # --- 成功率（%） ---
         - Id: success_rate
           Label: Batch Success Rate (%)
           Expression: "IF((total_success + total_failure) == 0, 100, 100 * total_success / (total_success + total_failure))"
           ReturnData: true
 
-      AlarmActions:
-        - !Ref SnsTopicArn
-
-  # ==========================================
-  # 2. バッチ全体 WaitTime P95 SLO（Worst Job）
-  # ==========================================
+  # ------------------------------------------------------------
+  # 2. バッチ全体の待機時間 P95 SLO
+  #    SLO: JobWaitTimeSeconds P95 <= 60 秒
+  #    評価: 5分粒度、直近2データポイント連続で違反したらアラーム
+  #    ※各ジョブの P95 を出し、その中の最大値を監視
+  # ------------------------------------------------------------
   SasakiEtlLambdaBatchWaitTimeP95Alarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
-      AlarmName: sasaki-etl-lambda-batch-waittime-p95-slo
+      AlarmName: sasaki-etl-lambda-batch-wait-time-p95-slo
       AlarmDescription: >
         【SLO監視】ETL Lambda バッチ全体において、直近 10 分間の待機時間 P95 の
-        最悪値が 60 秒（1 分）を超過した場合に通知します。
-        SLO: JobWaitTimeSeconds P95 ≤ 60 秒。
+        最も悪いジョブが 60 秒（1 分）を超過した場合に通知します。
+        SLO: JobWaitTimeSeconds P95 <= 60 秒。
+
       ComparisonOperator: GreaterThanThreshold
       Threshold: 60
-      EvaluationPeriods: 2           # 2×5分 = 10分連続で違反したらアラーム
+      EvaluationPeriods: 2         # 2 データポイント（= 10 分）で評価
       DatapointsToAlarm: 2
       TreatMissingData: notBreaching
+      ActionsEnabled: true
+      AlarmActions:
+        - !Ref SnsTopicArn
+
       Metrics:
-        # ---- ジョブ別 P95 ----
+        # --- ジョブ別の WaitTime P95 ---
         - Id: w1_order
           MetricStat:
             Metric:
@@ -177,7 +198,7 @@ Resources:
               MetricName: JobWaitTimeSeconds
               Dimensions:
                 - Name: JobType
-                  Value: "order_summary"
+                  Value: order_summary
                 - Name: JobCategory
                   Value: !Ref JobCategory
                 - Name: ExecutionEnv
@@ -193,7 +214,7 @@ Resources:
               MetricName: JobWaitTimeSeconds
               Dimensions:
                 - Name: JobType
-                  Value: "inventory_update"
+                  Value: inventory_update
                 - Name: JobCategory
                   Value: !Ref JobCategory
                 - Name: ExecutionEnv
@@ -209,7 +230,7 @@ Resources:
               MetricName: JobWaitTimeSeconds
               Dimensions:
                 - Name: JobType
-                  Value: "report_generation"
+                  Value: report_generation
                 - Name: JobCategory
                   Value: !Ref JobCategory
                 - Name: ExecutionEnv
@@ -218,31 +239,36 @@ Resources:
             Stat: p95
           ReturnData: false
 
-        # ---- ジョブ別 P95 の最大値（最悪値） ----
-        - Id: wait_p95_worst
-          Label: Batch WaitTime P95 (worst job)
+        # --- 最悪値（最大値）を監視 ---
+        - Id: worst_wait_p95
+          Label: Batch WaitTime P95 (Seconds)
           Expression: "MAX(FILL(w1_order,0), FILL(w1_inventory,0), FILL(w1_report,0))"
           ReturnData: true
 
-      AlarmActions:
-        - !Ref SnsTopicArn
+  # ------------------------------------------------------------
+  # 3. ジョブ別 処理時間 P95 SLO
+  #    SLO: JobDurationSeconds P95 <= 600 秒（10 分）
+  #    評価: 5分粒度、直近2データポイント連続で違反したらアラーム
+  # ------------------------------------------------------------
 
-  # ======================================
-  # 3. ジョブ別 Duration P95 SLO（3ジョブ分）
-  # ======================================
-  SasakiEtlLambdaOrderSummaryDurationP95Alarm:
+  SasakiEtlLambdaJobOrderSummaryDurationP95Alarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
       AlarmName: sasaki-etl-lambda-job-order-summary-duration-p95-slo
       AlarmDescription: >
-        【SLO監視】ETL Lambda ジョブ order_summary において、
-        直近 10 分間の処理時間 P95 が 600 秒（10 分）を超過した場合に通知します。
-        SLO: JobDurationSeconds P95 ≤ 600 秒。
+        【SLO監視】ETL Lambda ジョブ order_summary の処理時間 P95 が
+        600 秒（10 分）を超過した場合に通知します。
+        SLO: JobDurationSeconds P95 <= 600 秒。
+
       ComparisonOperator: GreaterThanThreshold
       Threshold: 600
       EvaluationPeriods: 2
       DatapointsToAlarm: 2
       TreatMissingData: notBreaching
+      ActionsEnabled: true
+      AlarmActions:
+        - !Ref SnsTopicArn
+
       Metrics:
         - Id: d1_order
           MetricStat:
@@ -251,7 +277,7 @@ Resources:
               MetricName: JobDurationSeconds
               Dimensions:
                 - Name: JobType
-                  Value: "order_summary"
+                  Value: order_summary
                 - Name: JobCategory
                   Value: !Ref JobCategory
                 - Name: ExecutionEnv
@@ -259,22 +285,25 @@ Resources:
             Period: 300
             Stat: p95
           ReturnData: true
-      AlarmActions:
-        - !Ref SnsTopicArn
 
-  SasakiEtlLambdaInventoryUpdateDurationP95Alarm:
+  SasakiEtlLambdaJobInventoryUpdateDurationP95Alarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
       AlarmName: sasaki-etl-lambda-job-inventory-update-duration-p95-slo
       AlarmDescription: >
-        【SLO監視】ETL Lambda ジョブ inventory_update において、
-        直近 10 分間の処理時間 P95 が 600 秒（10 分）を超過した場合に通知します。
-        SLO: JobDurationSeconds P95 ≤ 600 秒。
+        【SLO監視】ETL Lambda ジョブ inventory_update の処理時間 P95 が
+        600 秒（10 分）を超過した場合に通知します。
+        SLO: JobDurationSeconds P95 <= 600 秒。
+
       ComparisonOperator: GreaterThanThreshold
       Threshold: 600
       EvaluationPeriods: 2
       DatapointsToAlarm: 2
       TreatMissingData: notBreaching
+      ActionsEnabled: true
+      AlarmActions:
+        - !Ref SnsTopicArn
+
       Metrics:
         - Id: d1_inventory
           MetricStat:
@@ -283,7 +312,7 @@ Resources:
               MetricName: JobDurationSeconds
               Dimensions:
                 - Name: JobType
-                  Value: "inventory_update"
+                  Value: inventory_update
                 - Name: JobCategory
                   Value: !Ref JobCategory
                 - Name: ExecutionEnv
@@ -291,22 +320,25 @@ Resources:
             Period: 300
             Stat: p95
           ReturnData: true
-      AlarmActions:
-        - !Ref SnsTopicArn
 
-  SasakiEtlLambdaReportGenerationDurationP95Alarm:
+  SasakiEtlLambdaJobReportGenerationDurationP95Alarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
       AlarmName: sasaki-etl-lambda-job-report-generation-duration-p95-slo
       AlarmDescription: >
-        【SLO監視】ETL Lambda ジョブ report_generation において、
-        直近 10 分間の処理時間 P95 が 600 秒（10 分）を超過した場合に通知します。
-        SLO: JobDurationSeconds P95 ≤ 600 秒。
+        【SLO監視】ETL Lambda ジョブ report_generation の処理時間 P95 が
+        600 秒（10 分）を超過した場合に通知します。
+        SLO: JobDurationSeconds P95 <= 600 秒。
+
       ComparisonOperator: GreaterThanThreshold
       Threshold: 600
       EvaluationPeriods: 2
       DatapointsToAlarm: 2
       TreatMissingData: notBreaching
+      ActionsEnabled: true
+      AlarmActions:
+        - !Ref SnsTopicArn
+
       Metrics:
         - Id: d1_report
           MetricStat:
@@ -315,7 +347,7 @@ Resources:
               MetricName: JobDurationSeconds
               Dimensions:
                 - Name: JobType
-                  Value: "report_generation"
+                  Value: report_generation
                 - Name: JobCategory
                   Value: !Ref JobCategory
                 - Name: ExecutionEnv
@@ -323,5 +355,128 @@ Resources:
             Period: 300
             Stat: p95
           ReturnData: true
+
+  # ------------------------------------------------------------
+  # 4. （オプション）一定時間ジョブ未実行アラーム
+  #    直近 30 分間、全ジョブで成功・失敗が 1 件もない場合にアラーム
+  #    → TreatMissingData: breaching で「データなし＝異常」と扱う
+  # ------------------------------------------------------------
+  SasakiEtlLambdaBatchNoExecutionAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: sasaki-etl-lambda-batch-no-execution-30min
+      AlarmDescription: >
+        【SLO監視】ETL Lambda バッチが直近 30 分間まったく実行されていない
+        （成功・失敗が 1 件もない）場合に通知します。
+
+      ComparisonOperator: LessThanThreshold
+      Threshold: 1
+      EvaluationPeriods: 6          # 5分 x 6 = 30分
+      DatapointsToAlarm: 6
+      TreatMissingData: breaching   # データが無い = 異常
+      ActionsEnabled: true
       AlarmActions:
         - !Ref SnsTopicArn
+
+      Metrics:
+        # 成功・失敗メトリクスを 5分粒度で合計し、その総和を監視
+        - Id: m1_order_5
+          MetricStat:
+            Metric:
+              Namespace: !Ref Namespace
+              MetricName: JobSucceeded
+              Dimensions:
+                - Name: JobType
+                  Value: order_summary
+                - Name: JobCategory
+                  Value: !Ref JobCategory
+                - Name: ExecutionEnv
+                  Value: !Ref ExecutionEnv
+            Period: 300
+            Stat: Sum
+          ReturnData: false
+
+        - Id: m1_inventory_5
+          MetricStat:
+            Metric:
+              Namespace: !Ref Namespace
+              MetricName: JobSucceeded
+              Dimensions:
+                - Name: JobType
+                  Value: inventory_update
+                - Name: JobCategory
+                  Value: !Ref JobCategory
+                - Name: ExecutionEnv
+                  Value: !Ref ExecutionEnv
+            Period: 300
+            Stat: Sum
+          ReturnData: false
+
+        - Id: m1_report_5
+          MetricStat:
+            Metric:
+              Namespace: !Ref Namespace
+              MetricName: JobSucceeded
+              Dimensions:
+                - Name: JobType
+                  Value: report_generation
+                - Name: JobCategory
+                  Value: !Ref JobCategory
+                - Name: ExecutionEnv
+                  Value: !Ref ExecutionEnv
+            Period: 300
+            Stat: Sum
+          ReturnData: false
+
+        - Id: m2_order_5
+          MetricStat:
+            Metric:
+              Namespace: !Ref Namespace
+              MetricName: JobFailed
+              Dimensions:
+                - Name: JobType
+                  Value: order_summary
+                - Name: JobCategory
+                  Value: !Ref JobCategory
+                - Name: ExecutionEnv
+                  Value: !Ref ExecutionEnv
+            Period: 300
+            Stat: Sum
+          ReturnData: false
+
+        - Id: m2_inventory_5
+          MetricStat:
+            Metric:
+              Namespace: !Ref Namespace
+              MetricName: JobFailed
+              Dimensions:
+                - Name: JobType
+                  Value: inventory_update
+                - Name: JobCategory
+                  Value: !Ref JobCategory
+                - Name: ExecutionEnv
+                  Value: !Ref ExecutionEnv
+            Period: 300
+            Stat: Sum
+          ReturnData: false
+
+        - Id: m2_report_5
+          MetricStat:
+            Metric:
+              Namespace: !Ref Namespace
+              MetricName: JobFailed
+              Dimensions:
+                - Name: JobType
+                  Value: report_generation
+                - Name: JobCategory
+                  Value: !Ref JobCategory
+                - Name: ExecutionEnv
+                  Value: !Ref ExecutionEnv
+            Period: 300
+            Stat: Sum
+          ReturnData: false
+
+        - Id: total_jobs_5
+          Label: Batch Total Jobs (5min)
+          Expression: "FILL(m1_order_5,0) + FILL(m1_inventory_5,0) + FILL(m1_report_5,0) + FILL(m2_order_5,0) + FILL(m2_inventory_5,0) + FILL(m2_report_5,0)"
+          ReturnData: true
