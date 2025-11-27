@@ -1,0 +1,1038 @@
+{
+    "widgets": [
+        {
+            "type": "metric",
+            "x": 6,
+            "y": 0,
+            "width": 6,
+            "height": 6,
+            "properties": {
+                "metrics": [
+                    [ { "expression": "IF((e2+e3) == 0,100,100*e2/(e2+e3))", "label": "ジョブ成功率(%)", "id": "e1", "region": "ap-northeast-1", "period": 60 } ],
+                    [ { "expression": "FILL(m1,0)", "label": "成功数", "id": "e2", "region": "ap-northeast-1", "visible": false } ],
+                    [ { "expression": "FILL(m2,0)", "label": "失敗数", "id": "e3", "visible": false, "region": "ap-northeast-1" } ],
+                    [ "sasaki-Batchtest", "JobSucceeded-batch-normal", { "id": "m1", "region": "ap-northeast-1", "visible": false } ],
+                    [ ".", "JobFailed-batch-normal", { "id": "m2", "region": "ap-northeast-1", "visible": false } ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "ap-northeast-1",
+                "stat": "Sum",
+                "period": 60,
+                "yAxis": {
+                    "left": {
+                        "min": 95,
+                        "max": 100,
+                        "label": "成功率(%)",
+                        "showUnits": false
+                    }
+                },
+                "annotations": {
+                    "horizontal": [
+                        {
+                            "visible": false,
+                            "label": "SLO目標(99.5%)",
+                            "value": 99.5
+                        }
+                    ]
+                },
+                "title": "normalジョブ成功率(目標: ≧99.5%)"
+            }
+        },
+        {
+            "type": "metric",
+            "x": 0,
+            "y": 24,
+            "width": 6,
+            "height": 6,
+            "properties": {
+                "metrics": [
+                    [ "sasaki-Batchtest", "JobDuration-batch-critical", { "region": "ap-northeast-1", "yAxis": "left" } ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "ap-northeast-1",
+                "stat": "p95",
+                "period": 60,
+                "yAxis": {
+                    "left": {
+                        "label": "処理時間(秒)",
+                        "min": 0,
+                        "max": 5
+                    },
+                    "right": {
+                        "min": 0,
+                        "max": 20,
+                        "label": "処理時間"
+                    }
+                },
+                "annotations": {
+                    "horizontal": [
+                        {
+                            "label": "SLO(15分)",
+                            "value": 900,
+                            "fill": "above"
+                        }
+                    ]
+                },
+                "title": "critical処理時間 P95 (目標: ≦15分)"
+            }
+        },
+        {
+            "type": "metric",
+            "x": 0,
+            "y": 12,
+            "width": 6,
+            "height": 6,
+            "properties": {
+                "metrics": [
+                    [ { "expression": "FILL(m1,0)", "label": "成功数", "id": "e1" } ],
+                    [ "sasaki-Batchtest", "JobSucceeded-batch-critical", { "region": "ap-northeast-1", "id": "m1", "visible": false } ],
+                    [ ".", "JobFailed-batch-critical", { "color": "#d62728", "region": "ap-northeast-1", "id": "m2", "visible": false } ]
+                ],
+                "view": "timeSeries",
+                "stacked": true,
+                "region": "ap-northeast-1",
+                "stat": "Sum",
+                "period": 60,
+                "annotations": {
+                    "horizontal": [
+                        {
+                            "label": "SLO目標(100ジョブ/分)",
+                            "value": 100
+                        }
+                    ]
+                },
+                "yAxis": {
+                    "left": {
+                        "label": "ジョブ数/分",
+                        "min": 0,
+                        "max": 150
+                    }
+                },
+                "title": "critical処理能力(目標: ≧100ジョブ/分)"
+            }
+        },
+        {
+            "type": "metric",
+            "x": 0,
+            "y": 48,
+            "width": 6,
+            "height": 6,
+            "properties": {
+                "metrics": [
+                    [ "sasaki-Batchtest", "JobWaitTime-batch-critical", { "region": "ap-northeast-1" } ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "ap-northeast-1",
+                "stat": "p95",
+                "period": 60,
+                "yAxis": {
+                    "left": {
+                        "label": "待機時間(秒)",
+                        "min": 0,
+                        "max": 120
+                    }
+                },
+                "annotations": {
+                    "horizontal": [
+                        {
+                            "label": "SLO(60秒)",
+                            "value": 60,
+                            "fill": "above"
+                        }
+                    ]
+                },
+                "title": "critical待機時間 P95 (目標: ≦1分)"
+            }
+        },
+        {
+            "type": "metric",
+            "x": 0,
+            "y": 36,
+            "width": 6,
+            "height": 6,
+            "properties": {
+                "metrics": [
+                    [ { "expression": "IF((e3) == 0,0,100*e2/e3)", "label": "Retry発生率(%)", "id": "e1", "period": 60, "yAxis": "left", "region": "ap-northeast-1", "stat": "Sum" } ],
+                    [ { "expression": "FILL(m1,0)", "label": "リトライ回数", "id": "e2", "visible": false } ],
+                    [ { "expression": "FILL(m2,0)", "label": "ジョブ実行数", "id": "e3", "visible": false } ],
+                    [ "sasaki-Batchtest", "JobRetried-batch-critical", { "id": "m1", "region": "ap-northeast-1", "visible": false } ],
+                    [ ".", "JobCompleted-batch-critical", { "id": "m2", "region": "ap-northeast-1", "visible": false } ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "ap-northeast-1",
+                "stat": "Sum",
+                "period": 60,
+                "annotations": {
+                    "horizontal": [
+                        {
+                            "label": "SLO(1%)",
+                            "value": 1,
+                            "fill": "above"
+                        }
+                    ]
+                },
+                "title": "criticalRetry発生率(目標: ≦1%)",
+                "yAxis": {
+                    "left": {
+                        "min": 0,
+                        "max": 5,
+                        "label": "Retry発生率(%)"
+                    }
+                }
+            }
+        },
+        {
+            "type": "metric",
+            "x": 0,
+            "y": 0,
+            "width": 6,
+            "height": 6,
+            "properties": {
+                "metrics": [
+                    [ { "expression": "IF((e2+e3) == 0,100,100*e2/(e2+e3))", "label": "ジョブ成功率(%)", "id": "e1", "region": "ap-northeast-1", "period": 60 } ],
+                    [ { "expression": "FILL(m1,0)", "label": "成功数", "id": "e2", "region": "ap-northeast-1", "visible": false } ],
+                    [ { "expression": "FILL(m2,0)", "label": "失敗数", "id": "e3", "visible": false, "region": "ap-northeast-1" } ],
+                    [ "sasaki-Batchtest", "JobSucceeded-batch-critical", { "id": "m1", "region": "ap-northeast-1", "visible": false } ],
+                    [ "sasaki-Batchtest", "JobFailed-batch-critical", { "id": "m2", "region": "ap-northeast-1", "visible": false } ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "ap-northeast-1",
+                "stat": "Sum",
+                "period": 60,
+                "yAxis": {
+                    "left": {
+                        "min": 95,
+                        "max": 100,
+                        "label": "成功率(%)",
+                        "showUnits": false
+                    }
+                },
+                "annotations": {
+                    "horizontal": [
+                        {
+                            "label": "SLO目標(99.5%)",
+                            "value": 99.5,
+                            "fill": "below"
+                        }
+                    ]
+                },
+                "title": "criticalジョブ成功率(目標: ≧99.5%)"
+            }
+        },
+        {
+            "type": "metric",
+            "x": 12,
+            "y": 0,
+            "width": 6,
+            "height": 6,
+            "properties": {
+                "metrics": [
+                    [ { "expression": "IF((e2+e3) == 0,100,100*e2/(e2+e3))", "label": "ジョブ成功率(%)", "id": "e1", "region": "ap-northeast-1", "period": 60 } ],
+                    [ { "expression": "FILL(m1,0)", "label": "成功数", "id": "e2", "region": "ap-northeast-1", "visible": false } ],
+                    [ { "expression": "FILL(m2,0)", "label": "失敗数", "id": "e3", "visible": false, "region": "ap-northeast-1" } ],
+                    [ "sasaki-Batchtest", "JobSucceeded-batch-low", { "id": "m1", "visible": false, "region": "ap-northeast-1" } ],
+                    [ ".", "JobFailed-batch-low", { "id": "m2", "visible": false, "region": "ap-northeast-1" } ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "ap-northeast-1",
+                "stat": "Sum",
+                "period": 60,
+                "yAxis": {
+                    "left": {
+                        "min": 95,
+                        "max": 100,
+                        "label": "成功率(%)",
+                        "showUnits": false
+                    }
+                },
+                "annotations": {
+                    "horizontal": [
+                        {
+                            "visible": false,
+                            "label": "SLO目標(99.5%)",
+                            "value": 99.5
+                        }
+                    ]
+                },
+                "title": "lowジョブ成功率(目標: ≧99.5%)"
+            }
+        },
+        {
+            "type": "metric",
+            "x": 6,
+            "y": 12,
+            "width": 6,
+            "height": 6,
+            "properties": {
+                "metrics": [
+                    [ { "expression": "FILL(m1,0)", "label": "成功数", "id": "e1" } ],
+                    [ "sasaki-Batchtest", "JobSucceeded-batch-normal", { "region": "ap-northeast-1", "id": "m1", "visible": false } ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "ap-northeast-1",
+                "stat": "Sum",
+                "period": 60,
+                "annotations": {
+                    "horizontal": [
+                        {
+                            "visible": false,
+                            "label": "SLO目標(100ジョブ/分)",
+                            "value": 100
+                        }
+                    ]
+                },
+                "yAxis": {
+                    "left": {
+                        "label": "ジョブ数/分",
+                        "min": 0,
+                        "max": 150
+                    }
+                },
+                "title": "normal処理能力(目標: ≧100ジョブ/分)"
+            }
+        },
+        {
+            "type": "metric",
+            "x": 12,
+            "y": 12,
+            "width": 6,
+            "height": 6,
+            "properties": {
+                "metrics": [
+                    [ { "expression": "FILL(m1,0)", "label": "成功数", "id": "e1", "region": "ap-northeast-1" } ],
+                    [ "sasaki-Batchtest", "JobSucceeded-batch-low", { "region": "ap-northeast-1", "id": "m1" } ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "ap-northeast-1",
+                "stat": "Sum",
+                "period": 60,
+                "annotations": {
+                    "horizontal": [
+                        {
+                            "visible": false,
+                            "label": "SLO目標(100ジョブ/分)",
+                            "value": 100
+                        }
+                    ]
+                },
+                "yAxis": {
+                    "left": {
+                        "label": "ジョブ数/分",
+                        "min": 0,
+                        "max": 150
+                    }
+                },
+                "title": "low処理能力(目標: ≧100ジョブ/分)"
+            }
+        },
+        {
+            "type": "metric",
+            "x": 6,
+            "y": 24,
+            "width": 6,
+            "height": 6,
+            "properties": {
+                "metrics": [
+                    [ "sasaki-Batchtest", "JobDuration-batch-normal" ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "ap-northeast-1",
+                "stat": "p95",
+                "period": 60,
+                "yAxis": {
+                    "left": {
+                        "label": "処理時間(秒)",
+                        "min": 0,
+                        "max": 5
+                    },
+                    "right": {
+                        "min": 0,
+                        "max": 1000
+                    }
+                },
+                "annotations": {
+                    "horizontal": [
+                        {
+                            "label": "SLO(15分)",
+                            "value": 900
+                        }
+                    ]
+                },
+                "title": "normal処理時間 P95 (目標: ≦15分)"
+            }
+        },
+        {
+            "type": "metric",
+            "x": 12,
+            "y": 24,
+            "width": 6,
+            "height": 6,
+            "properties": {
+                "metrics": [
+                    [ "sasaki-Batchtest", "JobDuration-batch-low" ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "ap-northeast-1",
+                "stat": "p95",
+                "period": 60,
+                "yAxis": {
+                    "left": {
+                        "label": "処理時間(秒)",
+                        "min": 0,
+                        "max": 5
+                    },
+                    "right": {
+                        "min": 0,
+                        "max": 1000
+                    }
+                },
+                "annotations": {
+                    "horizontal": [
+                        {
+                            "label": "SLO(15分)",
+                            "value": 900
+                        }
+                    ]
+                },
+                "title": "low処理時間 P95 (目標: ≦15分)"
+            }
+        },
+        {
+            "type": "metric",
+            "x": 0,
+            "y": 6,
+            "width": 6,
+            "height": 6,
+            "properties": {
+                "metrics": [
+                    [ { "expression": "IF((e2+e3) == 0,100,100*e2/(e2+e3))", "label": "ジョブ成功率(%)", "id": "e1", "region": "ap-northeast-1", "period": 60 } ],
+                    [ { "expression": "FILL(m1,0)", "label": "成功数", "id": "e2", "region": "ap-northeast-1", "visible": false } ],
+                    [ { "expression": "FILL(m2,0)", "label": "失敗数", "id": "e3", "visible": false, "region": "ap-northeast-1" } ],
+                    [ "sasaki-Batchtest", "JobSucceeded-lambda-critical", { "id": "m1", "visible": false, "region": "ap-northeast-1" } ],
+                    [ ".", "JobFailed-lambda-critical", { "id": "m2", "visible": false, "region": "ap-northeast-1" } ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "ap-northeast-1",
+                "stat": "Sum",
+                "period": 60,
+                "yAxis": {
+                    "left": {
+                        "min": 95,
+                        "max": 100,
+                        "label": "成功率(%)",
+                        "showUnits": false
+                    }
+                },
+                "annotations": {
+                    "horizontal": [
+                        {
+                            "label": "SLO目標(99.5%)",
+                            "value": 99.5,
+                            "fill": "below"
+                        }
+                    ]
+                },
+                "title": "lambda-criticalジョブ成功率(目標: ≧99.5%)"
+            }
+        },
+        {
+            "type": "metric",
+            "x": 6,
+            "y": 6,
+            "width": 6,
+            "height": 6,
+            "properties": {
+                "metrics": [
+                    [ { "expression": "IF((e2+e3) == 0,100,100*e2/(e2+e3))", "label": "ジョブ成功率(%)", "id": "e1", "region": "ap-northeast-1", "period": 60 } ],
+                    [ { "expression": "FILL(m1,0)", "label": "成功数", "id": "e2", "region": "ap-northeast-1", "visible": false } ],
+                    [ { "expression": "FILL(m2,0)", "label": "失敗数", "id": "e3", "visible": false, "region": "ap-northeast-1" } ],
+                    [ "sasaki-Batchtest", "JobSucceeded-lambda-normal", { "id": "m1", "visible": false, "region": "ap-northeast-1" } ],
+                    [ ".", "JobFailed-lambda-normal", { "id": "m2", "visible": false, "region": "ap-northeast-1" } ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "ap-northeast-1",
+                "stat": "Sum",
+                "period": 60,
+                "yAxis": {
+                    "left": {
+                        "min": 95,
+                        "max": 100,
+                        "label": "成功率(%)",
+                        "showUnits": false
+                    }
+                },
+                "annotations": {
+                    "horizontal": [
+                        {
+                            "visible": false,
+                            "label": "SLO目標(99.5%)",
+                            "value": 99.5
+                        }
+                    ]
+                },
+                "title": "lambda-normalジョブ成功率(目標: ≧99.5%)"
+            }
+        },
+        {
+            "type": "metric",
+            "x": 12,
+            "y": 6,
+            "width": 6,
+            "height": 6,
+            "properties": {
+                "metrics": [
+                    [ { "expression": "IF((e2+e3) == 0,100,100*e2/(e2+e3))", "label": "ジョブ成功率(%)", "id": "e1", "region": "ap-northeast-1", "period": 60 } ],
+                    [ { "expression": "FILL(m1,0)", "label": "成功数", "id": "e2", "region": "ap-northeast-1", "visible": false } ],
+                    [ { "expression": "FILL(m2,0)", "label": "失敗数", "id": "e3", "visible": false, "region": "ap-northeast-1" } ],
+                    [ "sasaki-Batchtest", "JobSucceeded-lambda-low", { "id": "m1", "visible": false, "region": "ap-northeast-1" } ],
+                    [ ".", "JobFailed-lambda-low", { "id": "m2", "visible": false, "region": "ap-northeast-1" } ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "ap-northeast-1",
+                "stat": "Sum",
+                "period": 60,
+                "yAxis": {
+                    "left": {
+                        "min": 95,
+                        "max": 100,
+                        "label": "成功率(%)",
+                        "showUnits": false
+                    }
+                },
+                "annotations": {
+                    "horizontal": [
+                        {
+                            "visible": false,
+                            "label": "SLO目標(99.5%)",
+                            "value": 99.5
+                        }
+                    ]
+                },
+                "title": "lambda-lowジョブ成功率(目標: ≧99.5%)"
+            }
+        },
+        {
+            "type": "metric",
+            "x": 0,
+            "y": 18,
+            "width": 6,
+            "height": 6,
+            "properties": {
+                "metrics": [
+                    [ { "expression": "FILL(m1,0)", "label": "成功数", "id": "e1", "region": "ap-northeast-1" } ],
+                    [ "sasaki-Batchtest", "JobSucceeded-lambda-critical", { "region": "ap-northeast-1", "id": "m1", "visible": false } ],
+                    [ ".", "JobFailed-lambda-critical", { "color": "#d62728", "region": "ap-northeast-1", "visible": false, "id": "m2" } ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "ap-northeast-1",
+                "stat": "Sum",
+                "period": 60,
+                "annotations": {
+                    "horizontal": [
+                        {
+                            "label": "SLO目標(100ジョブ/分)",
+                            "value": 100
+                        }
+                    ]
+                },
+                "yAxis": {
+                    "left": {
+                        "label": "ジョブ数/分",
+                        "min": 0,
+                        "max": 150
+                    }
+                },
+                "title": "lambda-critical処理能力(目標: ≧100ジョブ/分)"
+            }
+        },
+        {
+            "type": "metric",
+            "x": 6,
+            "y": 18,
+            "width": 6,
+            "height": 6,
+            "properties": {
+                "metrics": [
+                    [ { "expression": "FILL(m1,0)", "label": "成功", "id": "e1" } ],
+                    [ "sasaki-Batchtest", "JobSucceeded-lambda-normal", { "region": "ap-northeast-1", "id": "m1", "visible": false } ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "ap-northeast-1",
+                "stat": "Sum",
+                "period": 60,
+                "annotations": {
+                    "horizontal": [
+                        {
+                            "visible": false,
+                            "label": "SLO目標(100ジョブ/分)",
+                            "value": 100
+                        }
+                    ]
+                },
+                "yAxis": {
+                    "left": {
+                        "label": "ジョブ数/分",
+                        "min": 0,
+                        "max": 150
+                    }
+                },
+                "title": "lambda-normal処理能力(目標: ≧100ジョブ/分)"
+            }
+        },
+        {
+            "type": "metric",
+            "x": 12,
+            "y": 18,
+            "width": 6,
+            "height": 6,
+            "properties": {
+                "metrics": [
+                    [ { "expression": "FILL(m1,0)", "label": "成功数", "id": "e1", "region": "ap-northeast-1" } ],
+                    [ "sasaki-Batchtest", "JobSucceeded-lambda-low", { "region": "ap-northeast-1", "id": "m1", "visible": false } ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "ap-northeast-1",
+                "stat": "Sum",
+                "period": 60,
+                "annotations": {
+                    "horizontal": [
+                        {
+                            "visible": false,
+                            "label": "SLO目標(100ジョブ/分)",
+                            "value": 100
+                        }
+                    ]
+                },
+                "yAxis": {
+                    "left": {
+                        "label": "ジョブ数/分",
+                        "min": 0,
+                        "max": 150
+                    }
+                },
+                "title": "lambda-low処理能力(目標: ≧100ジョブ/分)"
+            }
+        },
+        {
+            "type": "metric",
+            "x": 0,
+            "y": 30,
+            "width": 6,
+            "height": 6,
+            "properties": {
+                "metrics": [
+                    [ "sasaki-Batchtest", "JobDuration-lambda-critical", { "region": "ap-northeast-1", "yAxis": "right" } ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "ap-northeast-1",
+                "stat": "p95",
+                "period": 60,
+                "yAxis": {
+                    "left": {
+                        "label": "処理時間(秒)",
+                        "min": 0,
+                        "max": 5
+                    },
+                    "right": {
+                        "min": 0,
+                        "max": 20,
+                        "label": "処理時間(秒)"
+                    }
+                },
+                "annotations": {
+                    "horizontal": [
+                        {
+                            "label": "SLO(15分)",
+                            "value": 900,
+                            "fill": "above"
+                        }
+                    ]
+                },
+                "title": "lambda-critical処理時間 P95 (目標: ≦15分)"
+            }
+        },
+        {
+            "type": "metric",
+            "x": 6,
+            "y": 30,
+            "width": 6,
+            "height": 6,
+            "properties": {
+                "metrics": [
+                    [ "sasaki-Batchtest", "JobDuration-lambda-normal" ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "ap-northeast-1",
+                "stat": "p95",
+                "period": 60,
+                "yAxis": {
+                    "left": {
+                        "label": "処理時間(秒)",
+                        "min": 0,
+                        "max": 5
+                    },
+                    "right": {
+                        "min": 0,
+                        "max": 1000
+                    }
+                },
+                "annotations": {
+                    "horizontal": [
+                        {
+                            "label": "SLO(15分)",
+                            "value": 900
+                        }
+                    ]
+                },
+                "title": "lambda-normal処理時間 P95 (目標: ≦15分)"
+            }
+        },
+        {
+            "type": "metric",
+            "x": 12,
+            "y": 30,
+            "width": 6,
+            "height": 6,
+            "properties": {
+                "metrics": [
+                    [ "sasaki-Batchtest", "JobDuration-lambda-low" ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "ap-northeast-1",
+                "stat": "p95",
+                "period": 60,
+                "yAxis": {
+                    "left": {
+                        "label": "処理時間(秒)",
+                        "min": 0,
+                        "max": 5
+                    },
+                    "right": {
+                        "min": 0,
+                        "max": 1000
+                    }
+                },
+                "annotations": {
+                    "horizontal": [
+                        {
+                            "label": "SLO(15分)",
+                            "value": 900
+                        }
+                    ]
+                },
+                "title": "lambda-low処理時間 P95 (目標: ≦15分)"
+            }
+        },
+        {
+            "type": "metric",
+            "x": 6,
+            "y": 36,
+            "width": 6,
+            "height": 6,
+            "properties": {
+                "metrics": [
+                    [ { "expression": "IF((e3) == 0,0,100*e2/e3)", "label": "Retry発生率(%)", "id": "e1", "period": 60, "yAxis": "left", "region": "ap-northeast-1", "stat": "Sum" } ],
+                    [ { "expression": "FILL(m1,0)", "label": "リトライ回数", "id": "e2", "visible": false } ],
+                    [ { "expression": "FILL(m2,0)", "label": "ジョブ実行数", "id": "e3", "visible": false } ],
+                    [ "sasaki-Batchtest", "JobRetried-batch-normal", { "id": "m1", "visible": false, "region": "ap-northeast-1" } ],
+                    [ ".", "JobCompleted-batch-normal", { "id": "m2", "visible": false, "region": "ap-northeast-1" } ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "ap-northeast-1",
+                "stat": "Sum",
+                "period": 60,
+                "annotations": {
+                    "horizontal": [
+                        {
+                            "visible": false,
+                            "label": "SLO(1%)",
+                            "value": 1
+                        }
+                    ]
+                },
+                "title": "normalRetry発生率(目標: ≦1%)",
+                "yAxis": {
+                    "left": {
+                        "min": 0,
+                        "max": 5,
+                        "label": "Retry発生率(%)"
+                    }
+                }
+            }
+        },
+        {
+            "type": "metric",
+            "x": 12,
+            "y": 48,
+            "width": 6,
+            "height": 6,
+            "properties": {
+                "metrics": [
+                    [ "sasaki-Batchtest", "JobWaitTime-batch-low" ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "ap-northeast-1",
+                "stat": "p95",
+                "period": 60,
+                "yAxis": {
+                    "left": {
+                        "label": "待機時間(秒)",
+                        "min": 0,
+                        "max": 120
+                    }
+                },
+                "annotations": {
+                    "horizontal": [
+                        {
+                            "visible": false,
+                            "label": "SLO(60秒)",
+                            "value": 60
+                        }
+                    ]
+                },
+                "title": "low待機時間 P95 (目標: ≦1分)"
+            }
+        },
+        {
+            "type": "metric",
+            "x": 12,
+            "y": 36,
+            "width": 6,
+            "height": 6,
+            "properties": {
+                "metrics": [
+                    [ { "expression": "IF((e3) == 0,0,100*e2/e3)", "label": "Retry発生率(%)", "id": "e1", "period": 60, "yAxis": "left", "region": "ap-northeast-1", "stat": "Sum" } ],
+                    [ { "expression": "FILL(m1,0)", "label": "リトライ回数", "id": "e2", "visible": false } ],
+                    [ { "expression": "FILL(m2,0)", "label": "ジョブ実行数", "id": "e3", "visible": false } ],
+                    [ "sasaki-Batchtest", "JobRetried-batch-low", { "id": "m1", "visible": false, "region": "ap-northeast-1" } ],
+                    [ ".", "JobCompleted-batch-low", { "id": "m2", "visible": false, "region": "ap-northeast-1" } ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "ap-northeast-1",
+                "stat": "Sum",
+                "period": 60,
+                "annotations": {
+                    "horizontal": [
+                        {
+                            "visible": false,
+                            "label": "SLO(1%)",
+                            "value": 1
+                        }
+                    ]
+                },
+                "title": "lowRetry発生率(目標: ≦1%)",
+                "yAxis": {
+                    "left": {
+                        "min": 0,
+                        "max": 5,
+                        "label": "Retry発生率(%)"
+                    }
+                }
+            }
+        },
+        {
+            "type": "metric",
+            "x": 6,
+            "y": 48,
+            "width": 6,
+            "height": 6,
+            "properties": {
+                "metrics": [
+                    [ "sasaki-Batchtest", "JobWaitTime-batch-normal" ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "ap-northeast-1",
+                "stat": "p95",
+                "period": 60,
+                "yAxis": {
+                    "left": {
+                        "label": "待機時間(秒)",
+                        "min": 0,
+                        "max": 120
+                    }
+                },
+                "annotations": {
+                    "horizontal": [
+                        {
+                            "visible": false,
+                            "label": "SLO(60秒)",
+                            "value": 60
+                        }
+                    ]
+                },
+                "title": "normal待機時間 P95 (目標: ≦1分)"
+            }
+        },
+        {
+            "type": "metric",
+            "x": 0,
+            "y": 42,
+            "width": 6,
+            "height": 6,
+            "properties": {
+                "metrics": [
+                    [ { "expression": "IF((e3) == 0,0,100*e2/e3)", "label": "Retry発生率(%)", "id": "e1", "period": 60, "yAxis": "left", "region": "ap-northeast-1", "stat": "Sum" } ],
+                    [ { "expression": "FILL(m1,0)", "label": "リトライ回数", "id": "e2", "visible": false, "region": "ap-northeast-1" } ],
+                    [ { "expression": "FILL(m4,0)", "label": "ジョブ実行数", "id": "e3", "visible": false, "region": "ap-northeast-1" } ],
+                    [ "sasaki-Batchtest", "JobRetrited-lambda-critical", { "id": "m1", "region": "ap-northeast-1", "visible": false } ],
+                    [ ".", "JobCompleted-batch-critical", { "id": "m4", "visible": false, "region": "ap-northeast-1" } ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "ap-northeast-1",
+                "stat": "Sum",
+                "period": 60,
+                "annotations": {
+                    "horizontal": [
+                        {
+                            "label": "SLO(1%)",
+                            "value": 1,
+                            "fill": "above"
+                        }
+                    ]
+                },
+                "title": "lambda-criticalRetry発生率(目標: ≦1%)",
+                "yAxis": {
+                    "left": {
+                        "min": 0,
+                        "max": 5,
+                        "label": "Retry発生率(%)"
+                    }
+                }
+            }
+        },
+        {
+            "type": "metric",
+            "x": 6,
+            "y": 42,
+            "width": 6,
+            "height": 6,
+            "properties": {
+                "metrics": [
+                    [ { "expression": "IF((e3) == 0,0,100*e2/e3)", "label": "Retry発生率(%)", "id": "e1", "period": 60, "yAxis": "left", "region": "ap-northeast-1", "stat": "Sum" } ],
+                    [ { "expression": "FILL(m1,0)", "label": "リトライ回数", "id": "e2", "visible": false, "region": "ap-northeast-1" } ],
+                    [ { "expression": "FILL(m4,0)", "label": "ジョブ実行数", "id": "e3", "visible": false, "region": "ap-northeast-1" } ],
+                    [ "sasaki-Batchtest", "JobRetrited-lambda-normal", { "id": "m1", "region": "ap-northeast-1", "visible": false } ],
+                    [ ".", "JobCompleted-batch-normal", { "id": "m4", "visible": false, "region": "ap-northeast-1" } ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "ap-northeast-1",
+                "stat": "Sum",
+                "period": 60,
+                "annotations": {
+                    "horizontal": [
+                        {
+                            "visible": false,
+                            "label": "SLO(1%)",
+                            "value": 1
+                        }
+                    ]
+                },
+                "title": "lambda-normalRetry発生率(目標: ≦1%)",
+                "yAxis": {
+                    "left": {
+                        "min": 0,
+                        "max": 5,
+                        "label": "Retry発生率(%)"
+                    }
+                }
+            }
+        },
+        {
+            "type": "metric",
+            "x": 12,
+            "y": 42,
+            "width": 6,
+            "height": 6,
+            "properties": {
+                "metrics": [
+                    [ { "expression": "IF((e3) == 0,0,100*e2/e3)", "label": "Retry発生率(%)", "id": "e1", "period": 60, "yAxis": "left", "region": "ap-northeast-1", "stat": "Sum" } ],
+                    [ { "expression": "FILL(m1,0)", "label": "リトライ回数", "id": "e2", "visible": false, "region": "ap-northeast-1" } ],
+                    [ { "expression": "FILL(m4,0)", "label": "ジョブ実行数", "id": "e3", "visible": false, "region": "ap-northeast-1" } ],
+                    [ "sasaki-Batchtest", "JobRetrited-lambda-low", { "id": "m1", "region": "ap-northeast-1", "visible": false } ],
+                    [ ".", "JobCompleted-batch-low", { "id": "m4", "visible": false, "region": "ap-northeast-1" } ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "ap-northeast-1",
+                "stat": "Sum",
+                "period": 60,
+                "annotations": {
+                    "horizontal": [
+                        {
+                            "visible": false,
+                            "label": "SLO(1%)",
+                            "value": 1
+                        }
+                    ]
+                },
+                "title": "lambda-lowRetry発生率(目標: ≦1%)",
+                "yAxis": {
+                    "left": {
+                        "min": 0,
+                        "max": 5,
+                        "label": "Retry発生率(%)"
+                    }
+                }
+            }
+        },
+        {
+            "type": "metric",
+            "x": 0,
+            "y": 54,
+            "width": 6,
+            "height": 6,
+            "properties": {
+                "metrics": [
+                    [ "sasaki-Batchtest", "JobWaitTime-lambda-critical ", { "region": "ap-northeast-1" } ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "ap-northeast-1",
+                "stat": "p95",
+                "period": 60,
+                "yAxis": {
+                    "left": {
+                        "label": "待機時間(秒)",
+                        "min": 0,
+                        "max": 120
+                    }
+                },
+                "annotations": {
+                    "horizontal": [
+                        {
+                            "label": "SLO(60秒)",
+                            "value": 60,
+                            "fill": "above"
+                        }
+                    ]
+                },
+                "title": "lambda-critical待機時間 P95 (目標: ≦1分)"
+            }
+        }
+    ]
+}
