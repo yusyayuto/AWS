@@ -1,0 +1,120 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Step Functions ベース ETL バッチ監視用 CloudWatch アラーム一式
+  - バッチ全体の失敗検知
+  - バッチ全体の実行時間 SLO 監視
+  - バッチ未実行（起動なし）検知
+
+Parameters:
+  StateMachineArn:
+    Type: String
+    Description: 監視対象とする Step Functions ステートマシンの ARN
+    # 例: arn:aws:states:ap-northeast-1:123456789012:stateMachine:sasaki-stepfunctions-lambda-batch-jobwaittime
+
+  SnsTopicArn:
+    Type: String
+    Description: アラーム通知先 SNS トピックの ARN
+
+  BatchExecutionTimeSloSeconds:
+    Type: Number
+    Default: 600
+    Description: バッチ全体の実行時間 SLO（秒）デフォルト 600 秒（10 分）
+
+  NoExecutionWindowSeconds:
+    Type: Number
+    Default: 1800
+    Description: バッチ未実行を検知する観測窓（秒）デフォルト 1800 秒（30 分）
+
+Resources:
+
+  # ------------------------------------------------------------
+  # 1. バッチ失敗検知アラーム
+  #    SLO: 実行されたバッチは原則すべて成功で終了すること
+  #    条件: 直近 5 分間の ExecutionsFailed が 1 以上でアラーム
+  # ------------------------------------------------------------
+  SasakiEtlLambdaBatchExecutionFailedAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: sasaki-etl-lambda-batch-execution-failed
+      AlarmDescription: >
+        【バッチ監視】ETL Lambda バッチ（Step Functions）が失敗で終了した場合に通知します。
+        AWS/States.ExecutionsFailed >= 1 （直近 5 分間の合計）でアラーム。
+
+      Namespace: "AWS/States"
+      MetricName: "ExecutionsFailed"
+      Dimensions:
+        - Name: "StateMachineArn"
+          Value: !Ref StateMachineArn
+
+      Statistic: Sum
+      Period: 300                     # 5 分
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      ActionsEnabled: true
+      AlarmActions:
+        - !Ref SnsTopicArn
+
+  # ------------------------------------------------------------
+  # 2. バッチ全体実行時間 SLO 監視
+  #    SLO: ExecutionTime（バッチ全体）が BatchExecutionTimeSloSeconds 秒以内
+  #    条件: ExecutionTime の最大値がしきい値超過でアラーム
+  # ------------------------------------------------------------
+  SasakiEtlLambdaBatchExecutionTimeSloAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: sasaki-etl-lambda-batch-execution-time-slo
+      AlarmDescription: !Sub >
+        【バッチ監視】ETL Lambda バッチ（Step Functions）全体の実行時間が
+        ${BatchExecutionTimeSloSeconds} 秒を超過した場合に通知します。
+        AWS/States.ExecutionTime の最大値がしきい値を超えた場合にアラーム。
+
+      Namespace: "AWS/States"
+      MetricName: "ExecutionTime"
+      Dimensions:
+        - Name: "StateMachineArn"
+          Value: !Ref StateMachineArn
+
+      Statistic: Maximum
+      Period: 300                     # 5 分単位で最大値を評価
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      Threshold: !Sub "${BatchExecutionTimeSloSeconds}000"  # 秒 → ミリ秒
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      ActionsEnabled: true
+      AlarmActions:
+        - !Ref SnsTopicArn
+
+  # ------------------------------------------------------------
+  # 3. バッチ未実行検知アラーム
+  #    条件: 直近 NoExecutionWindowSeconds 秒間で ExecutionsStarted 合計が 1 未満
+  #         TreatMissingData=breaching により「データ無し＝異常」と判定
+  # ------------------------------------------------------------
+  SasakiEtlLambdaBatchNoExecutionAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: sasaki-etl-lambda-batch-no-execution-30min
+      AlarmDescription: !Sub >
+        【バッチ監視】ETL Lambda バッチ（Step Functions）が
+        直近 ${NoExecutionWindowSeconds} 秒間まったく起動していない場合に通知します。
+        AWS/States.ExecutionsStarted の合計が 1 未満の場合にアラーム。
+
+      Namespace: "AWS/States"
+      MetricName: "ExecutionsStarted"
+      Dimensions:
+        - Name: "StateMachineArn"
+          Value: !Ref StateMachineArn
+
+      Statistic: Sum
+      Period: !Ref NoExecutionWindowSeconds
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      Threshold: 1
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: breaching
+      ActionsEnabled: true
+      AlarmActions:
+        - !Ref SnsTopicArn
