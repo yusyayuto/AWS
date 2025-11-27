@@ -1,8 +1,8 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >
   ETL Lambda ジョブ監視用 CloudWatch アラーム一式
-  - 全ジョブ合算の成功率 SLO
-  - ジョブ群の待機時間 P95 SLO
+  - ジョブ合算の成功率 SLO
+  - バッチ全体の待機時間 P95 SLO（ジョブ別の最悪値）
   - ジョブ別の処理時間 P95 SLO
   - （オプション）一定時間ジョブ未実行アラーム
 
@@ -10,37 +10,37 @@ Parameters:
   Namespace:
     Type: String
     Default: "ETL/Batch"
-    Description: CloudWatch メトリクスの Namespace（デフォルト: ETL/Batch）
+    Description: "CloudWatch メトリクスの Namespace（デフォルト: ETL/Batch）"
 
   JobCategory:
     Type: String
     Default: "critical"
-    Description: JobCategory ディメンション値（現状は critical 固定運用を想定）
+    Description: "JobCategory ディメンション値（現状は critical 固定運用を想定）"
 
   ExecutionEnv:
     Type: String
     Default: "lambda"
-    Description: ExecutionEnv ディメンション値（Lambda 版: lambda / AWS Batch 版: awsbatch 等）
+    Description: "ExecutionEnv ディメンション値（Lambda 版: lambda / AWS Batch 版: awsbatch 等）"
 
   SnsTopicArn:
     Type: String
-    Description: アラーム通知先 SNS トピックの ARN を指定してください
+    Description: "アラーム通知先 SNS トピックの ARN を指定してください"
 
 Resources:
 
   # ------------------------------------------------------------
-  # 1. 全ジョブ合算の成功率 SLO
+  # 1. ジョブ合算の成功率 SLO
   #    SLO: 成功率 >= 99.5%
   #    評価: 1分粒度、直近3分のうち2分異常でアラーム
   # ------------------------------------------------------------
-  SasakiEtlLambdaJobAllSuccessRateAlarm:
+  SasakiEtlLambdaJobSuccessRateSloAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
-      AlarmName: sasaki-etl-lambda-job-all-success-rate-slo
+      AlarmName: sasaki-etl-lambda-job-success-rate-slo
       AlarmDescription: >
-        【SLO監視】ETL Lambda ジョブ3種類（order_summary / inventory_update / report_generation）
-        の合算成功率が直近 3 分間で 99.5% を下回った場合に通知します。
-        SLO: 全ジョブ合算の成功率 >= 99.5%。
+        【SLO監視】ETL Lambda ジョブ（order_summary / inventory_update / report_generation）
+        全体の直近 3 分間のジョブ成功率が 99.5% を下回った場合に通知します。
+        SLO: 成功率 >= 99.5%。
 
       ComparisonOperator: LessThanThreshold
       Threshold: 99.5
@@ -161,24 +161,23 @@ Resources:
 
         # --- 成功率（%） ---
         - Id: success_rate
-          Label: Jobs Success Rate (%)
+          Label: Job Success Rate (%)
           Expression: "IF((total_success + total_failure) == 0, 100, 100 * total_success / (total_success + total_failure))"
           ReturnData: true
 
   # ------------------------------------------------------------
-  # 2. ジョブ群の待機時間 P95 SLO
+  # 2. バッチ全体の待機時間 P95 SLO（ジョブ別の最悪値）
   #    SLO: JobWaitTimeSeconds P95 <= 60 秒
   #    評価: 5分粒度、直近2データポイント連続で違反したらアラーム
-  #    ※各ジョブの P95 を出し、その中の最大値を監視
   # ------------------------------------------------------------
-  SasakiEtlLambdaJobMaxWaitTimeP95Alarm:
+  SasakiEtlLambdaBatchWaitTimeP95SloAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
-      AlarmName: sasaki-etl-lambda-job-max-wait-time-p95-slo
+      AlarmName: sasaki-etl-lambda-batch-wait-time-p95-slo
       AlarmDescription: >
-        【SLO監視】ETL Lambda ジョブ3種類のうち、待機時間 P95 が最も悪いジョブが
-        直近 10 分間で 60 秒（1 分）を超過した場合に通知します。
-        SLO: 各ジョブの JobWaitTimeSeconds P95 <= 60 秒。
+        【SLO監視】ETL Lambda ジョブ群において、直近 10 分間の待機時間 P95 の
+        最も悪いジョブが 60 秒（1 分）を超過した場合に通知します。
+        SLO: JobWaitTimeSeconds P95 <= 60 秒。
 
       ComparisonOperator: GreaterThanThreshold
       Threshold: 60
@@ -241,7 +240,7 @@ Resources:
 
         # --- 最悪値（最大値）を監視 ---
         - Id: worst_wait_p95
-          Label: Jobs Max WaitTime P95 (Seconds)
+          Label: Batch WaitTime P95 (Seconds)
           Expression: "MAX(FILL(w1_order,0), FILL(w1_inventory,0), FILL(w1_report,0))"
           ReturnData: true
 
@@ -251,7 +250,7 @@ Resources:
   #    評価: 5分粒度、直近2データポイント連続で違反したらアラーム
   # ------------------------------------------------------------
 
-  SasakiEtlLambdaJobOrderSummaryDurationP95Alarm:
+  SasakiEtlLambdaJobOrderSummaryDurationP95SloAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
       AlarmName: sasaki-etl-lambda-job-order-summary-duration-p95-slo
@@ -286,7 +285,7 @@ Resources:
             Stat: p95
           ReturnData: true
 
-  SasakiEtlLambdaJobInventoryUpdateDurationP95Alarm:
+  SasakiEtlLambdaJobInventoryUpdateDurationP95SloAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
       AlarmName: sasaki-etl-lambda-job-inventory-update-duration-p95-slo
@@ -321,7 +320,7 @@ Resources:
             Stat: p95
           ReturnData: true
 
-  SasakiEtlLambdaJobReportGenerationDurationP95Alarm:
+  SasakiEtlLambdaJobReportGenerationDurationP95SloAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
       AlarmName: sasaki-etl-lambda-job-report-generation-duration-p95-slo
@@ -361,13 +360,13 @@ Resources:
   #    直近 30 分間、全ジョブで成功・失敗が 1 件もない場合にアラーム
   #    → TreatMissingData: breaching で「データなし＝異常」と扱う
   # ------------------------------------------------------------
-  SasakiEtlLambdaJobNoExecutionAlarm:
+  SasakiEtlLambdaBatchNoExecutionAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
-      AlarmName: sasaki-etl-lambda-job-no-execution-30min
+      AlarmName: sasaki-etl-lambda-batch-no-execution-30min
       AlarmDescription: >
-        【SLO監視】ETL Lambda ジョブ3種類について、
-        直近 30 分間に成功・失敗が 1 件も記録されていない場合に通知します。
+        【SLO監視】ETL Lambda ジョブが直近 30 分間まったく実行されていない
+        （成功・失敗が 1 件もない）場合に通知します。
 
       ComparisonOperator: LessThanThreshold
       Threshold: 1
@@ -477,6 +476,6 @@ Resources:
           ReturnData: false
 
         - Id: total_jobs_5
-          Label: Jobs Total Executions (5min)
+          Label: Batch Total Jobs (5min)
           Expression: "FILL(m1_order_5,0) + FILL(m1_inventory_5,0) + FILL(m1_report_5,0) + FILL(m2_order_5,0) + FILL(m2_inventory_5,0) + FILL(m2_report_5,0)"
           ReturnData: true
