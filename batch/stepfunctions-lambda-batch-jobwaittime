@@ -1,34 +1,129 @@
-"OrderSummary": {
-  "Type": "Task",
-  "Resource": "arn:aws:states:::lambda:invoke",
-  "Parameters": {
-    "FunctionName": "batch-etl-lambda",
-    "Payload": {
-      "scheduled_time.$": "$.batch_start_time",
-      "job_type": "order_summary",
-      "job_category.$": "$.job_category",
-      "retry_count.$": "$$.State.RetryCount"
+{
+  "Comment": "Sasaki ETL Lambda Batch - 3 jobs sequential with wait_time measurement",
+  "StartAt": "InitBatchContext",
+  "States": {
+    "InitBatchContext": {
+      "Type": "Pass",
+      "Comment": "バッチ共通コンテキスト（scheduled_time, job_category）をそのまま引き回す",
+      "ResultPath": "$",
+      "Next": "OrderSummary"
+    },
+
+    "OrderSummary": {
+      "Type": "Task",
+      "Comment": "ジョブ1: 注文集計 (job_type = order_summary)",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "batch-etl-lambda",
+        "Payload": {
+          "scheduled_time.$": "$.scheduled_time",
+          "job_category.$": "$.job_category",
+          "job_type": "order_summary",
+          "retry_count.$": "$$.State.RetryCount"
+        }
+      },
+      "Retry": [
+        {
+          "ErrorEquals": [ "States.ALL" ],
+          "IntervalSeconds": 5,
+          "MaxAttempts": 2,
+          "BackoffRate": 2.0
+        }
+      ],
+      "ResultSelector": {
+        "lambdaResult.$": "$.Payload"
+      },
+      "ResultPath": "$.order_summary",
+      "Catch": [
+        {
+          "ErrorEquals": [ "States.ALL" ],
+          "ResultPath": "$.order_summary_error",
+          "Next": "BatchFailed"
+        }
+      ],
+      "Next": "InventoryUpdate"
+    },
+
+    "InventoryUpdate": {
+      "Type": "Task",
+      "Comment": "ジョブ2: 在庫更新 (job_type = inventory_update)",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "batch-etl-lambda",
+        "Payload": {
+          "scheduled_time.$": "$.scheduled_time",
+          "job_category.$": "$.job_category",
+          "job_type": "inventory_update",
+          "retry_count.$": "$$.State.RetryCount"
+        }
+      },
+      "Retry": [
+        {
+          "ErrorEquals": [ "States.ALL" ],
+          "IntervalSeconds": 5,
+          "MaxAttempts": 2,
+          "BackoffRate": 2.0
+        }
+      ],
+      "ResultSelector": {
+        "lambdaResult.$": "$.Payload"
+      },
+      "ResultPath": "$.inventory_update",
+      "Catch": [
+        {
+          "ErrorEquals": [ "States.ALL" ],
+          "ResultPath": "$.inventory_update_error",
+          "Next": "BatchFailed"
+        }
+      ],
+      "Next": "ReportGeneration"
+    },
+
+    "ReportGeneration": {
+      "Type": "Task",
+      "Comment": "ジョブ3: レポート生成 (job_type = report_generation)",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "batch-etl-lambda",
+        "Payload": {
+          "scheduled_time.$": "$.scheduled_time",
+          "job_category.$": "$.job_category",
+          "job_type": "report_generation",
+          "retry_count.$": "$$.State.RetryCount"
+        }
+      },
+      "Retry": [
+        {
+          "ErrorEquals": [ "States.ALL" ],
+          "IntervalSeconds": 5,
+          "MaxAttempts": 2,
+          "BackoffRate": 2.0
+        }
+      ],
+      "ResultSelector": {
+        "lambdaResult.$": "$.Payload"
+      },
+      "ResultPath": "$.report_generation",
+      "Catch": [
+        {
+          "ErrorEquals": [ "States.ALL" ],
+          "ResultPath": "$.report_generation_error",
+          "Next": "BatchFailed"
+        }
+      ],
+      "Next": "BatchSucceeded"
+    },
+
+    "BatchSucceeded": {
+      "Type": "Succeed",
+      "Comment": "3 ジョブすべて成功した場合にここで終了"
+    },
+
+    "BatchFailed": {
+      "Type": "Fail",
+      "Comment": "いずれかのジョブが失敗した場合にここでバッチ全体を失敗として終了",
+      "Error": "BatchFailed",
+      "Cause": "One or more jobs in the batch failed."
     }
-  },
-  "Retry": [{
-    "ErrorEquals": ["States.ALL"],
-    "MaxAttempts": 2,
-    "IntervalSeconds": 5
-  }],
-  "Catch": [{
-    "ErrorEquals": ["States.ALL"],
-    "ResultPath": "$.error",
-    "Next": "NotifyFailureOrderSummary"
-  }],
-  "Next": "InventoryUpdate"
-},
-"NotifyFailureOrderSummary": {
-  "Type": "Task",
-  "Resource": "arn:aws:states:::sns:publish",
-  "Parameters": {
-    "TopicArn": "arn:aws:sns:ap-northeast-1:xxx:batch-error-alerts",
-    "Message.$": "$.error",
-    "Subject": "order_summary failed"
-  },
-  "End": true
+  }
 }
