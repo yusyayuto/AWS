@@ -1,64 +1,51 @@
 {
   "widgets": [
     {
-      "type": "text",
-      "x": 0,
-      "y": 0,
-      "width": 18,
-      "height": 3,
-      "properties": {
-        "markdown": "# ETL Batch SLO/SLI Realtime Dashboard\ncritical / lambda 専用ビュー（成功率・Retry・待機時間・処理時間・処理量）"
-      }
-    },
-
-    {
       "type": "metric",
       "x": 0,
-      "y": 3,
-      "width": 6,
+      "y": 0,
+      "width": 24,
       "height": 6,
       "properties": {
         "metrics": [
           [
             {
-              "expression": "IF((m1+m2)==0,100,100*m1/(m1+m2))",
-              "label": "ジョブ成功率(%)",
+              "expression": "IF(FILL(m1+m2,0)==0,100,100*FILL(m1,0)/FILL(m1+m2,0))",
+              "label": "バッチ成功率(%)",
               "id": "e1",
               "region": "ap-northeast-1",
               "period": 60
             }
           ],
           [
-            "ETL/Batch",
-            "JobSucceeded",
-            "JobCategory",
-            "critical",
-            "ExecutionEnv",
-            "lambda",
+            "AWS/States",
+            "ExecutionsSucceeded",
+            "StateMachineArn",
+            "arn:aws:states:ap-northeast-1:123456789012:stateMachine:lambda-etl-with-wait-time",
             {
               "id": "m1",
               "stat": "Sum",
-              "visible": false
+              "region": "ap-northeast-1",
+              "period": 60
             }
           ],
           [
-            "ETL/Batch",
-            "JobFailed",
-            "JobCategory",
-            "critical",
-            "ExecutionEnv",
-            "lambda",
+            ".",
+            "ExecutionsFailed",
+            ".",
+            ".",
             {
               "id": "m2",
               "stat": "Sum",
-              "visible": false
+              "region": "ap-northeast-1",
+              "period": 60
             }
           ]
         ],
         "view": "timeSeries",
         "stacked": false,
         "region": "ap-northeast-1",
-        "stat": "Average",
+        "stat": "Sum",
         "period": 60,
         "yAxis": {
           "left": {
@@ -71,47 +58,61 @@
         "annotations": {
           "horizontal": [
             {
-              "label": "SLO目標(99.5%)",
+              "label": "SLO目標(≧99.5%)",
               "value": 99.5,
               "fill": "below"
             }
           ]
         },
-        "title": "critical λ: ジョブ成功率(目標: ≧99.5%)"
+        "title": "バッチ全体成功率 (Step Functions基準)"
       }
     },
 
+    /* ───────── 1行目: 各ジョブの成功率 ───────── */
+
     {
       "type": "metric",
-      "x": 6,
-      "y": 3,
-      "width": 6,
+      "x": 0,
+      "y": 6,
+      "width": 8,
       "height": 6,
       "properties": {
         "metrics": [
           [
+            {
+              "expression": "IF(FILL(m1+m2,0)==0,100,100*FILL(m1,0)/FILL(m1+m2,0))",
+              "label": "成功率(%)",
+              "id": "e1",
+              "region": "ap-northeast-1",
+              "period": 60
+            }
+          ],
+          [
             "ETL/Batch",
             "JobSucceeded",
-            "JobCategory",
-            "critical",
+            "JobType",
+            "order_summary",
             "ExecutionEnv",
             "lambda",
             {
               "id": "m1",
-              "stat": "Sum"
+              "stat": "Sum",
+              "region": "ap-northeast-1",
+              "period": 60
             }
           ],
           [
             "ETL/Batch",
             "JobFailed",
-            "JobCategory",
-            "critical",
+            "JobType",
+            "order_summary",
             "ExecutionEnv",
             "lambda",
             {
               "id": "m2",
               "stat": "Sum",
-              "visible": false
+              "region": "ap-northeast-1",
+              "period": 60
             }
           ]
         ],
@@ -120,36 +121,39 @@
         "region": "ap-northeast-1",
         "stat": "Sum",
         "period": 60,
+        "yAxis": {
+          "left": {
+            "min": 95,
+            "max": 100,
+            "label": "成功率(%)",
+            "showUnits": false
+          }
+        },
         "annotations": {
           "horizontal": [
             {
-              "label": "SLO目標(100ジョブ/分)",
-              "value": 100
+              "label": "SLO目標(≧99.5%)",
+              "value": 99.5,
+              "fill": "below"
             }
           ]
         },
-        "yAxis": {
-          "left": {
-            "label": "ジョブ数/分",
-            "min": 0
-          }
-        },
-        "title": "critical λ: 処理能力 (成功ジョブ数/分)"
+        "title": "注文集計(order_summary) ジョブ成功率"
       }
     },
 
     {
       "type": "metric",
-      "x": 12,
-      "y": 3,
-      "width": 6,
+      "x": 8,
+      "y": 6,
+      "width": 8,
       "height": 6,
       "properties": {
         "metrics": [
           [
             {
-              "expression": "IF((m2+m3)==0,0,100*m1/(m2+m3))",
-              "label": "Retry発生率(%)",
+              "expression": "IF(FILL(m1+m2,0)==0,100,100*FILL(m1,0)/FILL(m1+m2,0))",
+              "label": "成功率(%)",
               "id": "e1",
               "region": "ap-northeast-1",
               "period": 60
@@ -157,86 +161,276 @@
           ],
           [
             "ETL/Batch",
-            "JobRetryCount",
-            "JobCategory",
-            "critical",
+            "JobSucceeded",
+            "JobType",
+            "inventory_update",
             "ExecutionEnv",
             "lambda",
             {
               "id": "m1",
-              "stat": "Sum"
-            }
-          ],
-          [
-            "ETL/Batch",
-            "JobSucceeded",
-            "JobCategory",
-            "critical",
-            "ExecutionEnv",
-            "lambda",
-            {
-              "id": "m2",
               "stat": "Sum",
-              "visible": false
+              "region": "ap-northeast-1",
+              "period": 60
             }
           ],
           [
             "ETL/Batch",
             "JobFailed",
-            "JobCategory",
-            "critical",
+            "JobType",
+            "inventory_update",
             "ExecutionEnv",
             "lambda",
             {
-              "id": "m3",
+              "id": "m2",
               "stat": "Sum",
-              "visible": false
+              "region": "ap-northeast-1",
+              "period": 60
             }
           ]
         ],
         "view": "timeSeries",
         "stacked": false,
         "region": "ap-northeast-1",
-        "stat": "Average",
+        "stat": "Sum",
         "period": 60,
+        "yAxis": {
+          "left": {
+            "min": 95,
+            "max": 100,
+            "label": "成功率(%)",
+            "showUnits": false
+          }
+        },
         "annotations": {
           "horizontal": [
             {
-              "label": "SLO目標(1%)",
-              "value": 1,
-              "fill": "above"
+              "label": "SLO目標(≧99.5%)",
+              "value": 99.5,
+              "fill": "below"
             }
           ]
         },
-        "yAxis": {
-          "left": {
-            "min": 0,
-            "max": 5,
-            "label": "Retry発生率(%)"
-          }
-        },
-        "title": "critical λ: Retry発生率(目標: ≦1%)"
+        "title": "在庫更新(inventory_update) ジョブ成功率"
       }
     },
 
     {
       "type": "metric",
+      "x": 16,
+      "y": 6,
+      "width": 8,
+      "height": 6,
+      "properties": {
+        "metrics": [
+          [
+            {
+              "expression": "IF(FILL(m1+m2,0)==0,100,100*FILL(m1,0)/FILL(m1+m2,0))",
+              "label": "成功率(%)",
+              "id": "e1",
+              "region": "ap-northeast-1",
+              "period": 60
+            }
+          ],
+          [
+            "ETL/Batch",
+            "JobSucceeded",
+            "JobType",
+            "report_generation",
+            "ExecutionEnv",
+            "lambda",
+            {
+              "id": "m1",
+              "stat": "Sum",
+              "region": "ap-northeast-1",
+              "period": 60
+            }
+          ],
+          [
+            "ETL/Batch",
+            "JobFailed",
+            "JobType",
+            "report_generation",
+            "ExecutionEnv",
+            "lambda",
+            {
+              "id": "m2",
+              "stat": "Sum",
+              "region": "ap-northeast-1",
+              "period": 60
+            }
+          ]
+        ],
+        "view": "timeSeries",
+        "stacked": false,
+        "region": "ap-northeast-1",
+        "stat": "Sum",
+        "period": 60,
+        "yAxis": {
+          "left": {
+            "min": 95,
+            "max": 100,
+            "label": "成功率(%)",
+            "showUnits": false
+          }
+        },
+        "annotations": {
+          "horizontal": [
+            {
+              "label": "SLO目標(≧99.5%)",
+              "value": 99.5,
+              "fill": "below"
+            }
+          ]
+        },
+        "title": "レポート生成(report_generation) ジョブ成功率"
+      }
+    },
+
+    /* ───────── 2行目: 各ジョブの処理時間 P95 ───────── */
+
+    {
+      "type": "metric",
       "x": 0,
-      "y": 9,
-      "width": 6,
+      "y": 12,
+      "width": 8,
+      "height": 6,
+      "properties": {
+        "metrics": [
+          [
+            "ETL/Batch",
+            "JobDurationSeconds",
+            "JobType",
+            "order_summary",
+            "ExecutionEnv",
+            "lambda"
+          ]
+        ],
+        "view": "timeSeries",
+        "stacked": false,
+        "region": "ap-northeast-1",
+        "stat": "p95",
+        "period": 60,
+        "yAxis": {
+          "left": {
+            "label": "処理時間(秒)",
+            "min": 0,
+            "max": 600
+          }
+        },
+        "annotations": {
+          "horizontal": [
+            {
+              "label": "SLO(≦600秒=10分)",
+              "value": 600,
+              "fill": "above"
+            }
+          ]
+        },
+        "title": "注文集計(order_summary) 処理時間 P95"
+      }
+    },
+
+    {
+      "type": "metric",
+      "x": 8,
+      "y": 12,
+      "width": 8,
+      "height": 6,
+      "properties": {
+        "metrics": [
+          [
+            "ETL/Batch",
+            "JobDurationSeconds",
+            "JobType",
+            "inventory_update",
+            "ExecutionEnv",
+            "lambda"
+          ]
+        ],
+        "view": "timeSeries",
+        "stacked": false,
+        "region": "ap-northeast-1",
+        "stat": "p95",
+        "period": 60,
+        "yAxis": {
+          "left": {
+            "label": "処理時間(秒)",
+            "min": 0,
+            "max": 600
+          }
+        },
+        "annotations": {
+          "horizontal": [
+            {
+              "label": "SLO(≦600秒=10分)",
+              "value": 600,
+              "fill": "above"
+            }
+          ]
+        },
+        "title": "在庫更新(inventory_update) 処理時間 P95"
+      }
+    },
+
+    {
+      "type": "metric",
+      "x": 16,
+      "y": 12,
+      "width": 8,
+      "height": 6,
+      "properties": {
+        "metrics": [
+          [
+            "ETL/Batch",
+            "JobDurationSeconds",
+            "JobType",
+            "report_generation",
+            "ExecutionEnv",
+            "lambda"
+          ]
+        ],
+        "view": "timeSeries",
+        "stacked": false,
+        "region": "ap-northeast-1",
+        "stat": "p95",
+        "period": 60,
+        "yAxis": {
+          "left": {
+            "label": "処理時間(秒)",
+            "min": 0,
+            "max": 600
+          }
+        },
+        "annotations": {
+          "horizontal": [
+            {
+              "label": "SLO(≦600秒=10分)",
+              "value": 600,
+              "fill": "above"
+            }
+          ]
+        },
+        "title": "レポート生成(report_generation) 処理時間 P95"
+      }
+    },
+
+    /* ───────── 3行目: 各ジョブの待機時間 P95 ───────── */
+
+    {
+      "type": "metric",
+      "x": 0,
+      "y": 18,
+      "width": 8,
       "height": 6,
       "properties": {
         "metrics": [
           [
             "ETL/Batch",
             "JobWaitTimeSeconds",
-            "JobCategory",
-            "critical",
+            "JobType",
+            "order_summary",
             "ExecutionEnv",
-            "lambda",
-            {
-              "stat": "p95"
-            }
+            "lambda"
           ]
         ],
         "view": "timeSeries",
@@ -254,34 +448,31 @@
         "annotations": {
           "horizontal": [
             {
-              "label": "SLO(60秒)",
+              "label": "SLO(≦60秒)",
               "value": 60,
               "fill": "above"
             }
           ]
         },
-        "title": "critical λ: 待機時間 P95 (目標: ≦1分)"
+        "title": "注文集計(order_summary) 待機時間 P95"
       }
     },
 
     {
       "type": "metric",
-      "x": 6,
-      "y": 9,
-      "width": 6,
+      "x": 8,
+      "y": 18,
+      "width": 8,
       "height": 6,
       "properties": {
         "metrics": [
           [
             "ETL/Batch",
-            "JobDurationSeconds",
-            "JobCategory",
-            "critical",
+            "JobWaitTimeSeconds",
+            "JobType",
+            "inventory_update",
             "ExecutionEnv",
-            "lambda",
-            {
-              "stat": "p95"
-            }
+            "lambda"
           ]
         ],
         "view": "timeSeries",
@@ -291,106 +482,125 @@
         "period": 60,
         "yAxis": {
           "left": {
-            "label": "処理時間(秒)",
+            "label": "待機時間(秒)",
             "min": 0,
-            "max": 900
+            "max": 120
           }
         },
         "annotations": {
           "horizontal": [
             {
-              "label": "SLO(10分)",
-              "value": 600,
+              "label": "SLO(≦60秒)",
+              "value": 60,
               "fill": "above"
             }
           ]
         },
-        "title": "critical λ: 処理時間 P95 (目標: ≦10分)"
+        "title": "在庫更新(inventory_update) 待機時間 P95"
       }
     },
 
     {
       "type": "metric",
-      "x": 12,
-      "y": 9,
-      "width": 6,
+      "x": 16,
+      "y": 18,
+      "width": 8,
       "height": 6,
       "properties": {
         "metrics": [
           [
             "ETL/Batch",
-            "JobRecordsProcessed",
-            "JobCategory",
-            "critical",
+            "JobWaitTimeSeconds",
+            "JobType",
+            "report_generation",
             "ExecutionEnv",
-            "lambda",
-            {
-              "stat": "Sum"
-            }
+            "lambda"
           ]
         ],
         "view": "timeSeries",
         "stacked": false,
         "region": "ap-northeast-1",
-        "stat": "Sum",
+        "stat": "p95",
         "period": 60,
         "yAxis": {
           "left": {
-            "label": "処理レコード数/分"
+            "label": "待機時間(秒)",
+            "min": 0,
+            "max": 120
           }
         },
-        "title": "critical λ: 処理レコード数/分"
+        "annotations": {
+          "horizontal": [
+            {
+              "label": "SLO(≦60秒)",
+              "value": 60,
+              "fill": "above"
+            }
+          ]
+        },
+        "title": "レポート生成(report_generation) 待機時間 P95"
       }
     },
+
+    /* ───────── 4行目: 各ジョブのリトライ発生率 ───────── */
 
     {
       "type": "metric",
       "x": 0,
-      "y": 15,
-      "width": 6,
+      "y": 24,
+      "width": 8,
       "height": 6,
       "properties": {
         "metrics": [
+          [
+            {
+              "expression": "IF(FILL(m2+m3,0)==0,0,100*FILL(m1,0)/FILL(m2+m3,0))",
+              "label": "Retry発生率(%)",
+              "id": "e1",
+              "region": "ap-northeast-1",
+              "period": 60
+            }
+          ],
+          [
+            "ETL/Batch",
+            "JobRetryCount",
+            "JobType",
+            "order_summary",
+            "ExecutionEnv",
+            "lambda",
+            {
+              "id": "m1",
+              "stat": "Sum",
+              "region": "ap-northeast-1",
+              "period": 60
+            }
+          ],
           [
             "ETL/Batch",
             "JobSucceeded",
             "JobType",
             "order_summary",
-            "JobCategory",
-            "critical",
             "ExecutionEnv",
             "lambda",
             {
-              "label": "order_summary",
-              "stat": "Sum"
+              "id": "m2",
+              "stat": "Sum",
+              "region": "ap-northeast-1",
+              "period": 60
             }
           ],
           [
             "ETL/Batch",
-            "JobSucceeded",
+            "JobFailed",
             "JobType",
-            "inventory_update",
-            "JobCategory",
-            "critical",
+            "order_summary",
             "ExecutionEnv",
             "lambda",
             {
-              "label": "inventory_update",
-              "stat": "Sum"
-            }
-          ],
-          [
-            "ETL/Batch",
-            "JobSucceeded",
-            "JobType",
-            "report_generation",
-            "JobCategory",
-            "critical",
-            "ExecutionEnv",
-            "lambda",
-            {
-              "label": "report_generation",
-              "stat": "Sum"
+              "id": "m3",
+              "stat": "Sum",
+              "region": "ap-northeast-1",
+              "period": 60
             }
           ]
         ],
@@ -401,34 +611,67 @@
         "period": 60,
         "yAxis": {
           "left": {
-            "label": "成功ジョブ数/分",
-            "min": 0
+            "min": 0,
+            "max": 5,
+            "label": "Retry発生率(%)"
           }
         },
-        "title": "JobType別 成功数 (critical λ)"
+        "annotations": {
+          "horizontal": [
+            {
+              "label": "SLO(≦1%)",
+              "value": 1,
+              "fill": "above"
+            }
+          ]
+        },
+        "title": "注文集計(order_summary) Retry発生率"
       }
     },
 
     {
       "type": "metric",
-      "x": 6,
-      "y": 15,
-      "width": 6,
+      "x": 8,
+      "y": 24,
+      "width": 8,
       "height": 6,
       "properties": {
         "metrics": [
           [
+            {
+              "expression": "IF(FILL(m2+m3,0)==0,0,100*FILL(m1,0)/FILL(m2+m3,0))",
+              "label": "Retry発生率(%)",
+              "id": "e1",
+              "region": "ap-northeast-1",
+              "period": 60
+            }
+          ],
+          [
             "ETL/Batch",
-            "JobFailed",
+            "JobRetryCount",
             "JobType",
-            "order_summary",
-            "JobCategory",
-            "critical",
+            "inventory_update",
             "ExecutionEnv",
             "lambda",
             {
-              "label": "order_summary",
-              "stat": "Sum"
+              "id": "m1",
+              "stat": "Sum",
+              "region": "ap-northeast-1",
+              "period": 60
+            }
+          ],
+          [
+            "ETL/Batch",
+            "JobSucceeded",
+            "JobType",
+            "inventory_update",
+            "ExecutionEnv",
+            "lambda",
+            {
+              "id": "m2",
+              "stat": "Sum",
+              "region": "ap-northeast-1",
+              "period": 60
             }
           ],
           [
@@ -436,27 +679,13 @@
             "JobFailed",
             "JobType",
             "inventory_update",
-            "JobCategory",
-            "critical",
             "ExecutionEnv",
             "lambda",
             {
-              "label": "inventory_update",
-              "stat": "Sum"
-            }
-          ],
-          [
-            "ETL/Batch",
-            "JobFailed",
-            "JobType",
-            "report_generation",
-            "JobCategory",
-            "critical",
-            "ExecutionEnv",
-            "lambda",
-            {
-              "label": "report_generation",
-              "stat": "Sum"
+              "id": "m3",
+              "stat": "Sum",
+              "region": "ap-northeast-1",
+              "period": 60
             }
           ]
         ],
@@ -467,62 +696,81 @@
         "period": 60,
         "yAxis": {
           "left": {
-            "label": "失敗ジョブ数/分",
-            "min": 0
+            "min": 0,
+            "max": 5,
+            "label": "Retry発生率(%)"
           }
         },
-        "title": "JobType別 失敗数 (critical λ)"
+        "annotations": {
+          "horizontal": [
+            {
+              "label": "SLO(≦1%)",
+              "value": 1,
+              "fill": "above"
+            }
+          ]
+        },
+        "title": "在庫更新(inventory_update) Retry発生率"
       }
     },
 
     {
       "type": "metric",
-      "x": 12,
-      "y": 15,
-      "width": 6,
+      "x": 16,
+      "y": 24,
+      "width": 8,
       "height": 6,
       "properties": {
         "metrics": [
           [
-            "ETL/Batch",
-            "JobRecordsProcessed",
-            "JobType",
-            "order_summary",
-            "JobCategory",
-            "critical",
-            "ExecutionEnv",
-            "lambda",
             {
-              "label": "order_summary",
-              "stat": "Sum"
+              "expression": "IF(FILL(m2+m3,0)==0,0,100*FILL(m1,0)/FILL(m2+m3,0))",
+              "label": "Retry発生率(%)",
+              "id": "e1",
+              "region": "ap-northeast-1",
+              "period": 60
             }
           ],
           [
             "ETL/Batch",
-            "JobRecordsProcessed",
-            "JobType",
-            "inventory_update",
-            "JobCategory",
-            "critical",
-            "ExecutionEnv",
-            "lambda",
-            {
-              "label": "inventory_update",
-              "stat": "Sum"
-            }
-          ],
-          [
-            "ETL/Batch",
-            "JobRecordsProcessed",
+            "JobRetryCount",
             "JobType",
             "report_generation",
-            "JobCategory",
-            "critical",
             "ExecutionEnv",
             "lambda",
             {
-              "label": "report_generation",
-              "stat": "Sum"
+              "id": "m1",
+              "stat": "Sum",
+              "region": "ap-northeast-1",
+              "period": 60
+            }
+          ],
+          [
+            "ETL/Batch",
+            "JobSucceeded",
+            "JobType",
+            "report_generation",
+            "ExecutionEnv",
+            "lambda",
+            {
+              "id": "m2",
+              "stat": "Sum",
+              "region": "ap-northeast-1",
+              "period": 60
+            }
+          ],
+          [
+            "ETL/Batch",
+            "JobFailed",
+            "JobType",
+            "report_generation",
+            "ExecutionEnv",
+            "lambda",
+            {
+              "id": "m3",
+              "stat": "Sum",
+              "region": "ap-northeast-1",
+              "period": 60
             }
           ]
         ],
@@ -533,11 +781,21 @@
         "period": 60,
         "yAxis": {
           "left": {
-            "label": "処理レコード数/分",
-            "min": 0
+            "min": 0,
+            "max": 5,
+            "label": "Retry発生率(%)"
           }
         },
-        "title": "JobType別 処理レコード数 (critical λ)"
+        "annotations": {
+          "horizontal": [
+            {
+              "label": "SLO(≦1%)",
+              "value": 1,
+              "fill": "above"
+            }
+          ]
+        },
+        "title": "レポート生成(report_generation) Retry発生率"
       }
     }
   ]
