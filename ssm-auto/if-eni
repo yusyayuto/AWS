@@ -1,0 +1,47 @@
+  - name: getENIFromLaunchTemplate
+    action: aws:executeAwsApi
+    nextStep: checkENIStatus
+    isEnd: false
+    inputs:
+      Service: ec2
+      Api: DescribeLaunchTemplateVersions
+      LaunchTemplateId: '{{ getOtherAZLaunchTemplateId.LaunchTemplateId }}'
+      Versions:
+        - $Latest
+    outputs:
+      - Name: NetworkInterfaceId
+        Selector: $.LaunchTemplateVersions[0].LaunchTemplateData.NetworkInterfaces[0].NetworkInterfaceId
+        Type: String
+
+  - name: checkENIStatus
+    action: aws:executeAwsApi
+    nextStep: branchOnENIStatus
+    isEnd: false
+    inputs:
+      Service: ec2
+      Api: DescribeNetworkInterfaces
+      NetworkInterfaceIds:
+        - '{{ getENIFromLaunchTemplate.NetworkInterfaceId }}'
+    outputs:
+      - Name: Status
+        Selector: $.NetworkInterfaces[0].Status
+        Type: String
+
+  - name: branchOnENIStatus
+    action: aws:branch
+    inputs:
+      Choices:
+        - NextStep: terminateAutomation
+          Variable: '{{ checkENIStatus.Status }}'
+          StringEquals: in-use
+      Default: getTargetGroupName
+    isEnd: false
+
+  - name: terminateAutomation
+    action: aws:sleep
+    inputs:
+      Duration: PT1S
+    isEnd: true
+
+  - name: getTargetGroupName
+    # ここに元々のgetTargetGroupNameステップの内容が続く
