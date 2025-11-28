@@ -1,113 +1,86 @@
 {
-  "Comment": "Sasaki ETL Lambda Batch - 3 jobs sequential with wait_time measurement",
+  "Comment": "Sasaki ETL Lambda Batch - job array + Map (sequential)",
   "StartAt": "InitBatchContext",
   "States": {
     "InitBatchContext": {
       "Type": "Pass",
-      "Comment": "バッチ共通コンテキスト（scheduled_time, job_category）をそのまま引き回す",
+      "Comment": "バッチ共通コンテキストを作成（scheduled_time, job_category, jobs配列）",
+      "Parameters": {
+        "scheduled_time.$": "$.scheduled_time",
+        "job_category.$": "$.job_category",
+        "jobs": {
+          "Items": [
+            { "job_type": "order_summary" },
+            { "job_type": "inventory_update" },
+            { "job_type": "report_generation" }
+          ]
+        }
+      },
       "ResultPath": "$",
-      "Next": "OrderSummary"
+      "Next": "RunJobs"
     },
 
-    "OrderSummary": {
-      "Type": "Task",
-      "Comment": "ジョブ1: 注文集計 (job_type = order_summary)",
-      "Resource": "arn:aws:states:::lambda:invoke",
+    "RunJobs": {
+      "Type": "Map",
+      "Comment": "jobs配列を順次処理（MaxConcurrency=1）",
+      "ItemsPath": "$.jobs.Items",
+      "MaxConcurrency": 1,
       "Parameters": {
-        "FunctionName": "batch-etl-lambda",
-        "Payload": {
-          "scheduled_time.$": "$.scheduled_time",
-          "job_category.$": "$.job_category",
-          "job_type": "order_summary",
-          "retry_count.$": "$$.State.RetryCount"
+        "scheduled_time.$": "$.scheduled_time",
+        "job_category.$": "$.job_category",
+        "job_type.$": "$$.Map.Item.Value.job_type",
+        "retry_count.$": "$$.State.RetryCount"
+      },
+      "Iterator": {
+        "StartAt": "InvokeJobLambda",
+        "States": {
+          "InvokeJobLambda": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::lambda:invoke",
+            "Comment": "job_typeごとに batch-etl-lambda を呼び出す",
+            "Parameters": {
+              "FunctionName": "batch-etl-lambda",
+              "Payload.$": "$"
+            },
+            "Retry": [
+              {
+                "ErrorEquals": [ "States.ALL" ],
+                "IntervalSeconds": 5,
+                "MaxAttempts": 2,
+                "BackoffRate": 2.0
+              }
+            ],
+            "ResultSelector": {
+              "lambdaResult.$": "$.Payload"
+            },
+            "ResultPath": "$.lambda",
+            "Catch": [
+              {
+                "ErrorEquals": [ "States.ALL" ],
+                "ResultPath": "$.error",
+                "Next": "JobFailed"
+              }
+            ],
+            "Next": "JobSucceeded"
+          },
+
+          "JobSucceeded": {
+            "Type": "Succeed",
+            "Comment": "1ジョブ分の処理が成功"
+          },
+
+          "JobFailed": {
+            "Type": "Fail",
+            "Comment": "1ジョブ分の処理が失敗",
+            "Error": "JobFailed",
+            "Cause": "Job failed inside Map iterator."
+          }
         }
       },
-      "Retry": [
-        {
-          "ErrorEquals": [ "States.ALL" ],
-          "IntervalSeconds": 5,
-          "MaxAttempts": 2,
-          "BackoffRate": 2.0
-        }
-      ],
-      "ResultSelector": {
-        "lambdaResult.$": "$.Payload"
-      },
-      "ResultPath": "$.order_summary",
       "Catch": [
         {
           "ErrorEquals": [ "States.ALL" ],
-          "ResultPath": "$.order_summary_error",
-          "Next": "BatchFailed"
-        }
-      ],
-      "Next": "InventoryUpdate"
-    },
-
-    "InventoryUpdate": {
-      "Type": "Task",
-      "Comment": "ジョブ2: 在庫更新 (job_type = inventory_update)",
-      "Resource": "arn:aws:states:::lambda:invoke",
-      "Parameters": {
-        "FunctionName": "batch-etl-lambda",
-        "Payload": {
-          "scheduled_time.$": "$.scheduled_time",
-          "job_category.$": "$.job_category",
-          "job_type": "inventory_update",
-          "retry_count.$": "$$.State.RetryCount"
-        }
-      },
-      "Retry": [
-        {
-          "ErrorEquals": [ "States.ALL" ],
-          "IntervalSeconds": 5,
-          "MaxAttempts": 2,
-          "BackoffRate": 2.0
-        }
-      ],
-      "ResultSelector": {
-        "lambdaResult.$": "$.Payload"
-      },
-      "ResultPath": "$.inventory_update",
-      "Catch": [
-        {
-          "ErrorEquals": [ "States.ALL" ],
-          "ResultPath": "$.inventory_update_error",
-          "Next": "BatchFailed"
-        }
-      ],
-      "Next": "ReportGeneration"
-    },
-
-    "ReportGeneration": {
-      "Type": "Task",
-      "Comment": "ジョブ3: レポート生成 (job_type = report_generation)",
-      "Resource": "arn:aws:states:::lambda:invoke",
-      "Parameters": {
-        "FunctionName": "batch-etl-lambda",
-        "Payload": {
-          "scheduled_time.$": "$.scheduled_time",
-          "job_category.$": "$.job_category",
-          "job_type": "report_generation",
-          "retry_count.$": "$$.State.RetryCount"
-        }
-      },
-      "Retry": [
-        {
-          "ErrorEquals": [ "States.ALL" ],
-          "IntervalSeconds": 5,
-          "MaxAttempts": 2,
-          "BackoffRate": 2.0
-        }
-      ],
-      "ResultSelector": {
-        "lambdaResult.$": "$.Payload"
-      },
-      "ResultPath": "$.report_generation",
-      "Catch": [
-        {
-          "ErrorEquals": [ "States.ALL" ],
-          "ResultPath": "$.report_generation_error",
+          "ResultPath": "$.batch_error",
           "Next": "BatchFailed"
         }
       ],
@@ -116,12 +89,12 @@
 
     "BatchSucceeded": {
       "Type": "Succeed",
-      "Comment": "3 ジョブすべて成功した場合にここで終了"
+      "Comment": "全ジョブ成功時にバッチ成功"
     },
 
     "BatchFailed": {
       "Type": "Fail",
-      "Comment": "いずれかのジョブが失敗した場合にここでバッチ全体を失敗として終了",
+      "Comment": "いずれかのジョブが失敗した場合にバッチ全体を失敗として終了",
       "Error": "BatchFailed",
       "Cause": "One or more jobs in the batch failed."
     }
